@@ -33,6 +33,10 @@ export interface EngineResult {
   momentum?: { side: string; reasons: string[] } | null;       // Engine 6
   lscc?: { side: string; reasons: string[] } | null;           // LSCC: liquidity sweep + separate confirmation candle
   structureSweep?: { side: string; reasons: string[]; biasDirection?: string; eventType?: string; breakLevel?: number } | null;
+  stochRsiSweep?: { side: string; reasons: string[]; stochK: number; stochD: number; rsi: number; confirmations: string[] } | null;
+  rsi?: number;
+  stochK?: number;
+  stochD?: number;
   reasons: string[];
   /** the hybrid engine's verdict for the newest closed candle (src/hybridEngine.ts). The strategy engines above are never changed by it. */
   hybrid?: HybridView;
@@ -137,7 +141,15 @@ async function verify(d: SignalDeps, engine: EngineResult, closed: Cand[], tf: n
   const side = engine.side as 'BUY' | 'SELL';
   const policy = d.policy ?? policyFromEnv();
   const candleTime = closed.length ? closed[closed.length - 1].time : 0;
-  const pattern = verifyPattern({ side, sweep: engine.sweep as any, continuation: engine.continuation as any, momentum: engine.momentum as any, lscc: engine.lscc as any, structure_sweep: engine.structureSweep as any }, closed, candleTime);
+  const pattern = verifyPattern({
+    side,
+    sweep: engine.sweep as any,
+    continuation: engine.continuation as any,
+    momentum: engine.momentum as any,
+    lscc: engine.lscc as any,
+    structure_sweep: engine.structureSweep as any,
+    stoch_rsi_sweep: engine.stochRsiSweep as any,
+  }, closed, candleTime);
   const condition = marketCondition(closed);
   const quality = assessMarketQuality(side, closed, condition);
   const base = { pattern, quality, ageSec, tf, policy };
@@ -214,7 +226,11 @@ export async function getSignal(d: SignalDeps, candles: Cand[], tf: number, labe
   const { condition, v } = await verify(d, engine, closed, tf, label, key, now, ageSec);
   const sig = merge(engine, v, candleTime, tf);
   sig.condition = condition;     // the dashboard's own measurements, untouched: the engine's sweep is reported in `verification`, not written into them
-  const names = [...(engine.sweep || engine.continuation || engine.structureSweep ? ['sweep'] : []), ...(engine.pattern ? ['pat'] : [])];
+  const names = [
+    ...(engine.stochRsiSweep ? ['stoch_rsi_sweep'] : []),
+    ...(engine.sweep || engine.continuation || engine.structureSweep ? ['sweep'] : []),
+    ...(engine.pattern ? ['pat'] : []),
+  ];
   sig.setupName = setupKind(sig.setup ? sig.side : null, condition, names);
   sig.contract = toAiContract(v, engine.side, now);
   try { d.observe?.(sig, { key, label, closed }); } catch { /* logging must never change a signal */ }
@@ -304,6 +320,15 @@ export function registerSignalRoutes(app: Express, port: number) {
     res.json(tradeHistory);
   });
 
+  const computeKeyLevels = (bars: Cand[]) => {
+    const w = bars.slice(-30);
+    if (!w.length) return { support: null, resistance: null };
+    return {
+      support: Math.min(...w.map((c) => c.low)),
+      resistance: Math.max(...w.map((c) => c.high)),
+    };
+  };
+
   app.post('/api/signal', async (req, res) => {
     try {
       const candles: Cand[] = Array.isArray(req.body?.candles) ? req.body.candles.slice(-600) : [];
@@ -311,8 +336,118 @@ export function registerSignalRoutes(app: Express, port: number) {
       const tf = isSupportedTimeframe(rawTf) || rawTf === 30 ? rawTf : getGlobalTiming().tfSec;
       const label = String(req.body?.label ?? req.body?.symbol ?? 'this market').slice(0, 40);
       const nowSec = Number.isFinite(Number(req.body?.now)) && Number(req.body?.now) > 1e9 ? Number(req.body.now) : undefined;
+      const nowMs = nowSec != null ? nowSec * 1000 : Date.now();
+      const closed = candles.length && candles[candles.length - 1].time >= Math.floor(nowMs / 1000 / tf) * tf ? candles.slice(0, -1) : candles;
       const s = await getSignal(liveDeps(port), candles, tf, label, String(req.body?.symbol ?? label), nowSec);
-      res.json({ status: 'ok', signal: s });
+      res.json({ status: 'ok', signal: s, levels: computeKeyLevels(closed), closed: closed.slice(-85) });
+    } catch (e) {
+      res.json({ status: 'error', msg: (e as Error).message });
+    }
+  });
+
+  app.post('/api/signal/autoscan', async (req, res) => {
+    try {
+      const [{ SWEEP_AGENTS, brokerNowSync }, { derivBridge }] = await Promise.all([
+        import('./src/sweepWatcher'),
+        import('./src/derivBridge'),
+      ]);
+      const timing = getGlobalTiming();
+      const rawTf = req.body?.tf !== undefined ? Number(req.body.tf) : timing.tfSec;
+      const tf = isSupportedTimeframe(rawTf) || rawTf === 30 ? rawTf : timing.tfSec;
+      const expirySec = req.body?.expirySec !== undefined && Number(req.body.expirySec) > 0 ? Number(req.body.expirySec) : timing.expirySec;
+      const nowSec = Number.isFinite(Number(req.body?.now)) && Number(req.body?.now) > 1e9 ? Number(req.body.now) : brokerNowSync();
+
+      const agents = [...SWEEP_AGENTS];
+      const candidates: Array<{
+        agent: (typeof agents)[number];
+        candles: Cand[];
+        closed: Cand[];
+        engine: EngineResult;
+        rankScore: number;
+      }> = [];
+
+      const queue = [...agents];
+      const worker = async () => {
+        while (queue.length) {
+          const agent = queue.shift()!;
+          try {
+            const raw = await derivBridge.getCandles(agent.symbol, tf, 120);
+            if (!Array.isArray(raw) || raw.length < 30) continue;
+            const candles: Cand[] = raw.map((c: any) => ({
+              time: Number(c.time),
+              open: Number(c.open),
+              high: Number(c.high),
+              low: Number(c.low),
+              close: Number(c.close),
+            }));
+            const closed = candles.length && candles[candles.length - 1].time + tf > nowSec ? candles.slice(0, -1) : candles;
+            if (closed.length < 30) continue;
+            const engine = await runEngines(port, candles, tf, nowSec, agent.symbol);
+            if (!engine.setup || !engine.side) continue;
+            const priority = engine.stochRsiSweep ? 300 : engine.agree >= 2 ? 200 : 100;
+            const goldBonus = agent.symbol === 'frxXAUUSD' ? 2 : 0;
+            candidates.push({
+              agent,
+              candles,
+              closed,
+              engine,
+              rankScore: priority + engine.confidence + goldBonus,
+            });
+          } catch {
+            // Skip markets unavailable right now without failing the scan
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: 6 }, worker));
+      candidates.sort((a, b) => b.rankScore - a.rankScore);
+
+      if (candidates.length === 0) {
+        return res.json({
+          status: 'ok',
+          signal: null,
+          scannedAgents: agents.length,
+          foundCount: 0,
+          tf,
+          expirySec,
+          msg: 'No active Stochastic+RSI+Sweep or price-action setups across all agents on the current closed candle.',
+        });
+      }
+
+      const base = liveDeps(port);
+      const scanPolicy: ExecutionPolicy = {
+        ...(base.policy ?? policyFromEnv()),
+        maxSignalAgeSec: Math.max(tf, base.policy?.maxSignalAgeSec ?? 60),
+      };
+
+      let best: { candidate: (typeof candidates)[number]; signal: Signal } | null = null;
+      for (const cand of candidates.slice(0, 4)) {
+        const deps: SignalDeps = {
+          ...base,
+          policy: scanPolicy,
+          engines: async () => cand.engine,
+        };
+        const sig = await getSignal(deps, cand.candles, tf, cand.agent.market, `deriv:${cand.agent.symbol}`, nowSec);
+        if (!best || (sig.tradeable && !best.signal.tradeable)) {
+          best = { candidate: cand, signal: sig };
+        }
+        if (sig.tradeable) break;
+      }
+
+      const picked = best!;
+      return res.json({
+        status: 'ok',
+        signal: picked.signal,
+        symbol: picked.candidate.agent.symbol,
+        market: picked.candidate.agent.market,
+        name: picked.candidate.agent.name,
+        tf,
+        expirySec,
+        levels: computeKeyLevels(picked.candidate.closed),
+        closed: picked.candidate.closed.slice(-85),
+        scannedAgents: agents.length,
+        foundCount: candidates.length,
+      });
     } catch (e) {
       res.json({ status: 'error', msg: (e as Error).message });
     }

@@ -1,6 +1,7 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { createChart, CrosshairMode, IChartApi, ISeriesApi, UTCTimestamp } from "lightweight-charts";
+import { createChart, CrosshairMode, IChartApi, ISeriesApi, LineStyle, LogicalRange, UTCTimestamp } from "lightweight-charts";
 import { BROKERS, ChartType } from "./assets";
+import { computeIndicatorSeries } from "./stochRsiSweep";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const clock = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}:` : "") + `${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
@@ -9,6 +10,9 @@ const decimalsFor = (p: number) => (p < 10 ? 5 : p < 1000 ? 3 : 2);
 const UP = "#22c55e";
 const DOWN = "#ef4444";
 const ACCENT = "#4d7cff";
+const STO_K_BLUE = "#3b82f6";
+const STO_D_ORANGE = "#f97316";
+const RSI_LIME = "#a3e635";
 
 interface Candle {
   time: number;
@@ -53,10 +57,13 @@ function haNext(c: Candle, prev?: Candle): Candle {
 
 const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ wsBase, broker, asset, tf, reloadKey, chartType }, ref) {
   const box = useRef<HTMLDivElement>(null);
+  const stochBox = useRef<HTMLDivElement>(null);
+  const rsiBox = useRef<HTMLDivElement>(null);
   const pill = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<"connecting" | "live" | "error">("connecting");
   const [msg, setMsg] = useState("");
   const [tickRate, setTickRate] = useState(0);
+  const [indReadout, setIndReadout] = useState<{ k: number; d: number; rsi: number }>({ k: 50, d: 50, rsi: 50 });
 
   const typeRef = useRef<ChartType>(chartType);
   typeRef.current = chartType;
@@ -104,16 +111,88 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
   useEffect(() => {
     setState("connecting");
     setMsg("");
-    if (!box.current) return;
+    if (!box.current || !stochBox.current || !rsiBox.current) return;
 
-    const chart: IChartApi = createChart(box.current, {
+    const commonOpts = {
       autoSize: true,
-      layout: { background: { color: "#0a1020" }, textColor: "#7d89a8", fontSize: 12 },
+      layout: { background: { color: "#0a1020" }, textColor: "#7d89a8", fontSize: 11 },
       grid: { vertLines: { color: "#111a30" }, horzLines: { color: "#111a30" } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 8, barSpacing: 11, minBarSpacing: 3 },
+    };
+
+    const chart: IChartApi = createChart(box.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      timeScale: { visible: false, borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 8, barSpacing: 11, minBarSpacing: 3 },
     });
+
+    const stochChart: IChartApi = createChart(stochBox.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.14, bottom: 0.1 } },
+      timeScale: { visible: false, borderVisible: false, rightOffset: 8, barSpacing: 11, minBarSpacing: 3 },
+      handleScroll: { horzTouchDrag: true, vertTouchDrag: false, mouseWheel: true, pressedMouseMove: true },
+      handleScale: { axisPressedMouseMove: false, mouseWheel: true, pinch: true },
+    });
+
+    const rsiChart: IChartApi = createChart(rsiBox.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.14, bottom: 0.08 } },
+      timeScale: { visible: true, borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 8, barSpacing: 11, minBarSpacing: 3 },
+      handleScroll: { horzTouchDrag: true, vertTouchDrag: false, mouseWheel: true, pressedMouseMove: true },
+      handleScale: { axisPressedMouseMove: false, mouseWheel: true, pinch: true },
+    });
+
+    const fixedOscRange = () => ({ priceRange: { minValue: 0, maxValue: 100 } });
+
+    const stochDSeries = stochChart.addLineSeries({
+      color: STO_D_ORANGE,
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    const stochKSeries = stochChart.addLineSeries({
+      color: STO_K_BLUE,
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    stochKSeries.createPriceLine({ price: 80, color: "#22c55e", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    stochKSeries.createPriceLine({ price: 20, color: "#eab308", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+
+    const rsiSeries = rsiChart.addLineSeries({
+      color: RSI_LIME,
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    rsiSeries.createPriceLine({ price: 70, color: "#22c55e", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 50, color: "#64748b", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 30, color: "#eab308", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+
+    let syncingRange = false;
+    const syncRangeFrom = (source: IChartApi, targets: IChartApi[]) => {
+      source.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
+        if (syncingRange || !range) return;
+        syncingRange = true;
+        try {
+          for (const tgt of targets) tgt.timeScale().setVisibleLogicalRange(range);
+        } finally {
+          syncingRange = false;
+        }
+      });
+    };
+    syncRangeFrom(chart, [stochChart, rsiChart]);
+    syncRangeFrom(stochChart, [chart, rsiChart]);
+    syncRangeFrom(rsiChart, [chart, stochChart]);
 
     let cs: Candle[] = [];   // candles exactly as the bridge sent them
     let ha: Candle[] = [];   // Heikin Ashi version, kept in step with cs while that chart type is shown
@@ -168,6 +247,29 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
       applyPrecision();
     };
 
+    const syncIndicatorsFull = () => {
+      if (!cs.length) return;
+      const ind = computeIndicatorSeries(cs);
+      stochKSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.stochK[idx] })));
+      stochDSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.stochD[idx] })));
+      rsiSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.rsi[idx] })));
+      const tail = cs.length - 1;
+      setIndReadout({ k: ind.stochK[tail], d: ind.stochD[tail], rsi: ind.rsi[tail] });
+    };
+
+    const syncIndicatorsTip = () => {
+      if (!cs.length) return;
+      const tailWindow = cs.slice(-180);
+      const ind = computeIndicatorSeries(tailWindow);
+      const lastBar = tailWindow[tailWindow.length - 1];
+      const tailIdx = tailWindow.length - 1;
+      const t = lastBar.time as UTCTimestamp;
+      stochKSeries.update({ time: t, value: ind.stochK[tailIdx] });
+      stochDSeries.update({ time: t, value: ind.stochD[tailIdx] });
+      rsiSeries.update({ time: t, value: ind.rsi[tailIdx] });
+      setIndReadout({ k: ind.stochK[tailIdx], d: ind.stochD[tailIdx], rsi: ind.rsi[tailIdx] });
+    };
+
     // Draw every candle again (history arrived, or the chart type changed).
     const render = () => {
       if (type === "heikin") {
@@ -176,6 +278,7 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
       }
       series.setData(cs.map((_, i) => pointFor(shown(i))));
       if (type === "baseline" && cs.length) series.applyOptions({ baseValue: { type: "price", price: cs[cs.length - 1].close } });
+      syncIndicatorsFull();
       last = cs.length ? cs[cs.length - 1] : null;
     };
 
@@ -188,6 +291,7 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
       const i = cs.length - 1;
       if (type === "heikin") ha[i] = haNext(cs[i], ha[i - 1]);
       series.update(pointFor(shown(i)));
+      syncIndicatorsTip();
       last = c;
     };
 
@@ -227,7 +331,22 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
         left: tf - (Math.floor(Date.now() / 1000) % tf),
         dec: dec ?? 5,
       }),
-      shot: () => chart.takeScreenshot(),
+      shot: () => {
+        const cMain = chart.takeScreenshot();
+        const cSto = stochChart.takeScreenshot();
+        const cRsi = rsiChart.takeScreenshot();
+        const out = document.createElement("canvas");
+        out.width = Math.max(cMain.width, cSto.width, cRsi.width);
+        out.height = cMain.height + cSto.height + cRsi.height;
+        const ctx = out.getContext("2d");
+        if (!ctx) return cMain;
+        ctx.fillStyle = "#0a1020";
+        ctx.fillRect(0, 0, out.width, out.height);
+        ctx.drawImage(cMain, 0, 0);
+        ctx.drawImage(cSto, 0, cMain.height);
+        ctx.drawImage(cRsi, 0, cMain.height + cSto.height);
+        return out;
+      },
     };
 
     const ticker = setInterval(place, 250);
@@ -248,7 +367,10 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
               render();
               if (!m.resync) {
                 const len = cs.length;
-                chart.timeScale().setVisibleLogicalRange({ from: len - 35, to: len + 4 });
+                const rng = { from: len - 35, to: len + 4 };
+                chart.timeScale().setVisibleLogicalRange(rng);
+                stochChart.timeScale().setVisibleLogicalRange(rng);
+                rsiChart.timeScale().setVisibleLogicalRange(rng);
               }
               setState("live");
               place();
@@ -300,6 +422,8 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
       clearInterval(meter);
       if (ws) ws.close();
       chart.remove();
+      stochChart.remove();
+      rsiChart.remove();
     };
   }, [wsBase, broker, asset, tf, reloadKey]);
 
@@ -308,20 +432,40 @@ const ChartView = forwardRef<ChartHandle, ChartViewProps>(function ChartView({ w
 
   return (
     <div className="chart-wrap">
-      <div ref={box} className="chart" />
-      <div ref={pill} className="pill" style={{ display: "none" }}><span /><span /></div>
+      <div className="chart-main">
+        <div ref={box} className="chart" />
+        <div ref={pill} className="pill" style={{ display: "none" }}><span /><span /></div>
+        {state === "live" && (
+          <div className="rate" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+            <span>{tickRate} updates/s</span>
+            <span style={{ color: "#7d89a8", borderLeft: "1px solid #1e293b", paddingLeft: "8px" }}>
+              {new Date().toISOString().substring(11, 19)} UTC+0
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="ind-pane">
+        <div className="ind-lbl">
+          <span>Stochastic Oscillator 14 3 3</span>
+          <span style={{ color: STO_K_BLUE }}>%K {indReadout.k.toFixed(1)}</span>
+          <span style={{ color: STO_D_ORANGE }}>%D {indReadout.d.toFixed(1)}</span>
+        </div>
+        <div ref={stochBox} className="chart" />
+      </div>
+
+      <div className="ind-pane rsi">
+        <div className="ind-lbl">
+          <span>RSI 14</span>
+          <span style={{ color: RSI_LIME }}>{indReadout.rsi.toFixed(1)}</span>
+        </div>
+        <div ref={rsiBox} className="chart" />
+      </div>
+
       {state !== "live" && (
         <div className="overlay">
           <b>{state === "error" ? "Bridge error" : "Waiting for live data"}</b>
           <span>{msg || `Connecting to ${BROKERS.find((b) => b.id === broker)?.name || broker}...`}</span>
-        </div>
-      )}
-      {state === "live" && (
-        <div className="rate" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-          <span>{tickRate} updates/s</span>
-          <span style={{ color: "#7d89a8", borderLeft: "1px solid #1e293b", paddingLeft: "8px" }}>
-            {new Date().toISOString().substring(11, 19)} UTC+0
-          </span>
         </div>
       )}
     </div>

@@ -121,10 +121,21 @@ export default function ProMode({ http, balance, isDemo, ready, onToast, onExit 
         </div>
         <div className="qm-seg two">
           <button className={!shown.autoTiming ? "on" : ""} disabled={run} onClick={() => set({ autoTiming: false })}>Global Manual</button>
-          <button className={shown.autoTiming ? "on" : ""} disabled={run} onClick={() => set({ autoTiming: true })}><Zap size={13} /> Auto 5m</button>
+          <button
+            className={shown.autoTiming ? "on" : ""}
+            disabled={run}
+            onClick={() => {
+              set({ autoTiming: true, tfSec: 300, expirySec: 300 });
+              void updateTiming({ tfSec: 300, expirySec: 300 }).then((r) => {
+                if (!r.ok) onToast(r.error || "Timing sync failed");
+              });
+            }}
+          >
+            <Zap size={13} /> Auto 5m
+          </button>
         </div>
         {shown.autoTiming ? (
-          <p className="qm-hint">Auto locks to the 5-minute chart with a 5-minute expiry (your execution policy). Choose Global Manual to use another time frame or expiry.{run && st?.timing ? <> <b>Now: {st.timing}</b></> : null}</p>
+          <p className="qm-hint">Auto locks all agents to the 5-minute chart with a 5-minute expiry. Choose Global Manual to set any time frame and expiry across all agents.{run && st?.timing ? <> <b>Now: {st.timing}</b></> : null}</p>
         ) : (
           <>
             <h4 className="qm-lbl">GLOBAL TIME FRAME (ALL AGENTS)</h4>
@@ -202,7 +213,7 @@ export default function ProMode({ http, balance, isDemo, ready, onToast, onExit 
       {run
         ? <button className="qm-go stop big" onClick={() => void ap.stop()}><Square size={20} fill="currentColor" /> STOP AUTO TRADE</button>
         : <button className="qm-go big" disabled={starting} onClick={() => void start()}><Play size={20} fill="currentColor" /> {starting ? "STARTING…" : "AUTO TRADE"}</button>}
-      {!run && <p className="qm-disc center">The engines and AI choose the market, confirm the setup, place the trade and follow it to the result. It stops by itself at your limits.</p>}
+      {!run && <p className="qm-disc center">All 31 agents run Stochastic(14,3,3) + RSI(14) + Lookback Wick Sweep/Pattern alongside the preserved candlestick &amp; structure engines on your selected global timeframe and expiry.</p>}
 
       {open && st && summary && (
         <div className={`qm-card live ${run ? "gc" : ""}`}>

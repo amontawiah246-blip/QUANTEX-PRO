@@ -17,11 +17,12 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { createChart, CrosshairMode, IChartApi, UTCTimestamp } from "lightweight-charts";
+import { createChart, CrosshairMode, IChartApi, LineStyle, LogicalRange, UTCTimestamp } from "lightweight-charts";
 import { apiFetch } from "./api";
 import { fmtShort } from "./assets";
 import { BROKER_TIMEFRAME_OPTIONS, formatTimingLabel } from "./globalConfig";
 import type { SweepFeed } from "./SweepAlerts";
+import { computeIndicatorSeries, detectStochRsiSweepSignal } from "./stochRsiSweep";
 import { useGlobalTiming } from "./useGlobalTiming";
 
 export interface AgentDef {
@@ -405,6 +406,8 @@ export interface AgentLiveState {
   signalName: string;
   sweepReason: string;
   rsi: number;
+  stochK: number;
+  stochD: number;
   trend: "Bullish" | "Bearish" | "Consolidating";
   lastTrade?: {
     id: string;
@@ -416,7 +419,7 @@ export interface AgentLiveState {
   };
 }
 
-// Full interactive lightweight-charts canvas for the single active agent screen
+// Full interactive lightweight-charts canvas with synchronized Stochastic Oscillator (14,3,3) + RSI(14) sub-panes
 function AgentFullChart({
   wsBase,
   symbol,
@@ -428,20 +431,43 @@ function AgentFullChart({
   tf: number;
   onPriceUpdate?: (price: number, changePct: number, high: number, low: number, isUp: boolean) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mainRef = useRef<HTMLDivElement | null>(null);
+  const stochRef = useRef<HTMLDivElement | null>(null);
+  const rsiRef = useRef<HTMLDivElement | null>(null);
+  const [indReadout, setIndReadout] = useState<{ k: number; d: number; rsi: number }>({ k: 50, d: 50, rsi: 50 });
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!mainRef.current || !stochRef.current || !rsiRef.current) return;
 
-    const chart: IChartApi = createChart(containerRef.current, {
+    const commonOpts = {
       autoSize: true,
       layout: { background: { color: "#060a17" }, textColor: "#8899b8", fontSize: 11 },
       grid: { vertLines: { color: "#111c33" }, horzLines: { color: "#111c33" } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 6, barSpacing: 10 },
+    };
+
+    const chart: IChartApi = createChart(mainRef.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      timeScale: { visible: false, borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 6, barSpacing: 10, minBarSpacing: 3 },
       handleScroll: true,
       handleScale: true,
+    });
+
+    const stochChart: IChartApi = createChart(stochRef.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.14, bottom: 0.1 } },
+      timeScale: { visible: false, borderVisible: false, rightOffset: 6, barSpacing: 10, minBarSpacing: 3 },
+      handleScroll: { horzTouchDrag: true, vertTouchDrag: false, mouseWheel: true, pressedMouseMove: true },
+      handleScale: { axisPressedMouseMove: false, mouseWheel: true, pinch: true },
+    });
+
+    const rsiChart: IChartApi = createChart(rsiRef.current, {
+      ...commonOpts,
+      rightPriceScale: { borderVisible: false, minimumWidth: 66, scaleMargins: { top: 0.14, bottom: 0.08 } },
+      timeScale: { visible: true, borderVisible: false, timeVisible: true, secondsVisible: tf < 60, rightOffset: 6, barSpacing: 10, minBarSpacing: 3 },
+      handleScroll: { horzTouchDrag: true, vertTouchDrag: false, mouseWheel: true, pressedMouseMove: true },
+      handleScale: { axisPressedMouseMove: false, mouseWheel: true, pinch: true },
     });
 
     const series = chart.addCandlestickSeries({
@@ -450,13 +476,90 @@ function AgentFullChart({
       wickUpColor: "#22c55e",
       wickDownColor: "#ef4444",
       borderVisible: false,
+      lastValueVisible: true,
+      priceLineVisible: true,
     });
+
+    const fixedOscRange = () => ({ priceRange: { minValue: 0, maxValue: 100 } });
+
+    const stochDSeries = stochChart.addLineSeries({
+      color: "#f97316",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    const stochKSeries = stochChart.addLineSeries({
+      color: "#3b82f6",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    stochKSeries.createPriceLine({ price: 80, color: "#22c55e", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    stochKSeries.createPriceLine({ price: 20, color: "#eab308", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+
+    const rsiSeries = rsiChart.addLineSeries({
+      color: "#a3e635",
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true,
+      autoscaleInfoProvider: fixedOscRange,
+    });
+    rsiSeries.createPriceLine({ price: 70, color: "#22c55e", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 50, color: "#64748b", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+    rsiSeries.createPriceLine({ price: 30, color: "#eab308", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" });
+
+    let syncingRange = false;
+    const syncRangeFrom = (source: IChartApi, targets: IChartApi[]) => {
+      source.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
+        if (syncingRange || !range) return;
+        syncingRange = true;
+        try {
+          for (const tgt of targets) tgt.timeScale().setVisibleLogicalRange(range);
+        } finally {
+          syncingRange = false;
+        }
+      });
+    };
+    syncRangeFrom(chart, [stochChart, rsiChart]);
+    syncRangeFrom(stochChart, [chart, rsiChart]);
+    syncRangeFrom(rsiChart, [chart, stochChart]);
 
     let ws: WebSocket | null = null;
     let closed = false;
     let firstOpen = 0;
     let highP = 0;
     let lowP = Infinity;
+    let cs: MiniCandle[] = [];
+
+    const syncIndicatorsFull = () => {
+      if (!cs.length) return;
+      const ind = computeIndicatorSeries(cs);
+      stochKSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.stochK[idx] })));
+      stochDSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.stochD[idx] })));
+      rsiSeries.setData(cs.map((c, idx) => ({ time: c.time as UTCTimestamp, value: ind.rsi[idx] })));
+      const tail = cs.length - 1;
+      setIndReadout({ k: ind.stochK[tail], d: ind.stochD[tail], rsi: ind.rsi[tail] });
+    };
+
+    const syncIndicatorsTip = () => {
+      if (!cs.length) return;
+      const tailWindow = cs.slice(-180);
+      const ind = computeIndicatorSeries(tailWindow);
+      const tailIdx = tailWindow.length - 1;
+      const t = tailWindow[tailIdx].time as UTCTimestamp;
+      stochKSeries.update({ time: t, value: ind.stochK[tailIdx] });
+      stochDSeries.update({ time: t, value: ind.stochD[tailIdx] });
+      rsiSeries.update({ time: t, value: ind.rsi[tailIdx] });
+      setIndReadout({ k: ind.stochK[tailIdx], d: ind.stochD[tailIdx], rsi: ind.rsi[tailIdx] });
+    };
 
     const openStream = () => {
       try {
@@ -467,20 +570,31 @@ function AgentFullChart({
           try {
             const m = JSON.parse(e.data);
             if (m.type === "history" && Array.isArray(m.candles) && m.candles.length) {
-              const formatted = m.candles.map((c: any) => {
+              highP = 0;
+              lowP = Infinity;
+              cs = m.candles.map((c: any) => {
                 if (c.high > highP) highP = c.high;
                 if (c.low < lowP) lowP = c.low;
                 return {
+                  time: c.time as number,
+                  open: c.open as number,
+                  high: c.high as number,
+                  low: c.low as number,
+                  close: c.close as number,
+                };
+              });
+              series.setData(
+                cs.map((c) => ({
                   time: c.time as UTCTimestamp,
                   open: c.open,
                   high: c.high,
                   low: c.low,
                   close: c.close,
-                };
-              });
-              series.setData(formatted);
-              const last = formatted[formatted.length - 1];
-              firstOpen = formatted[0].open;
+                }))
+              );
+              syncIndicatorsFull();
+              const last = cs[cs.length - 1];
+              firstOpen = cs[0].open;
               if (last && onPriceUpdate) {
                 const pct = firstOpen ? ((last.close - firstOpen) / firstOpen) * 100 : 0;
                 onPriceUpdate(last.close, pct, highP, lowP === Infinity ? last.low : lowP, last.close >= last.open);
@@ -489,16 +603,23 @@ function AgentFullChart({
               const c = m.candle;
               if (c.high > highP) highP = c.high;
               if (c.low < lowP) lowP = c.low;
+              const bar: MiniCandle = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close };
+              const n = cs.length;
+              if (n && cs[n - 1].time === bar.time) cs[n - 1] = bar;
+              else if (!n || bar.time > cs[n - 1].time) cs.push(bar);
+              else return;
+
               series.update({
-                time: c.time as UTCTimestamp,
-                open: c.open,
-                high: c.high,
-                low: c.low,
-                close: c.close,
+                time: bar.time as UTCTimestamp,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
               });
+              syncIndicatorsTip();
               if (onPriceUpdate) {
-                const pct = firstOpen ? ((c.close - firstOpen) / firstOpen) * 100 : 0;
-                onPriceUpdate(c.close, pct, highP, lowP, c.close >= c.open);
+                const pct = firstOpen ? ((bar.close - firstOpen) / firstOpen) * 100 : 0;
+                onPriceUpdate(bar.close, pct, highP, lowP, bar.close >= bar.open);
               }
             }
           } catch {
@@ -518,12 +639,29 @@ function AgentFullChart({
       closed = true;
       if (ws) ws.close();
       chart.remove();
+      stochChart.remove();
+      rsiChart.remove();
     };
   }, [wsBase, symbol, tf, onPriceUpdate]);
 
   return (
-    <div className="relative w-full h-[380px] md:h-[460px] rounded-2xl bg-[#060a17] border border-[#14213d] overflow-hidden my-3 shadow-2xl">
-      <div ref={containerRef} className="w-full h-full" />
+    <div className="w-full rounded-2xl bg-[#060a17] border border-[#14213d] overflow-hidden my-3 shadow-2xl flex flex-col">
+      <div ref={mainRef} className="w-full h-[270px] md:h-[330px]" />
+      <div className="relative w-full h-[105px] border-t border-[#14213d]">
+        <div className="pointer-events-none absolute top-1 left-2.5 z-10 flex items-center gap-2 text-[10px] font-mono">
+          <span className="text-slate-300 font-semibold">Stochastic Oscillator 14 3 3</span>
+          <span className="text-[#3b82f6] font-bold">%K {indReadout.k.toFixed(1)}</span>
+          <span className="text-[#f97316] font-bold">%D {indReadout.d.toFixed(1)}</span>
+        </div>
+        <div ref={stochRef} className="w-full h-full" />
+      </div>
+      <div className="relative w-full h-[95px] border-t border-[#14213d]">
+        <div className="pointer-events-none absolute top-1 left-2.5 z-10 flex items-center gap-2 text-[10px] font-mono">
+          <span className="text-slate-300 font-semibold">RSI 14</span>
+          <span className="text-[#a3e635] font-bold">{indReadout.rsi.toFixed(1)}</span>
+        </div>
+        <div ref={rsiRef} className="w-full h-full" />
+      </div>
     </div>
   );
 }
@@ -678,15 +816,17 @@ export default function SignalPackageAgents({
     }
   }, [sweep.alerts, onToast]);
 
-  // Helper to compute synthetic indicators from candles
+  // Evaluate authentic causal Slow Stochastic (14,3,3) + Wilder RSI(14) indicators from candles
   const evaluateAgent = (cs: MiniCandle[]): Partial<AgentLiveState> => {
-    if (!cs || cs.length < 5) {
+    if (!cs || cs.length < 18) {
       return {
         side: "neutral",
         confidence: 50,
-        signalName: "Scanning Deriv tick flow…",
-        sweepReason: "Building candle structure",
+        signalName: "Warming Stoch(14,3,3) & RSI(14)…",
+        sweepReason: "Collecting warmup candles",
         rsi: 50,
+        stochK: 50,
+        stochD: 50,
         trend: "Consolidating",
       };
     }
@@ -695,51 +835,47 @@ export default function SignalPackageAgents({
     const closes = cs.map((c) => c.close);
     const last = cs[n - 1];
 
-    let gains = 0, losses = 0;
-    const rsiPeriod = Math.min(14, n - 1);
-    for (let i = n - rsiPeriod; i < n; i++) {
-      const diff = cs[i].close - cs[i - 1].close;
-      if (diff >= 0) gains += diff;
-      else losses -= diff;
-    }
-    const rs = losses === 0 ? 100 : gains / (losses || 1);
-    const rsi = Math.round(100 - 100 / (1 + rs));
+    const series = computeIndicatorSeries(cs);
+    const k = series.stochK[n - 1];
+    const d = series.stochD[n - 1];
+    const rsi = Math.round(series.rsi[n - 1] * 10) / 10;
 
-    const emaShort = closes.slice(-5).reduce((a, b) => a + b, 0) / 5;
-    const emaLong = closes.slice(-15).reduce((a, b) => a + b, 0) / Math.min(15, closes.length);
-    const isBull = emaShort > emaLong;
+    // Causal EMA 9 & EMA 21 on closes for overall ribbon trend label
+    const emaCalc = (period: number) => {
+      const m = 2 / (period + 1);
+      let v = closes[0];
+      for (let i = 1; i < closes.length; i++) v = closes[i] * m + v * (1 - m);
+      return v;
+    };
+    const ema9 = emaCalc(9);
+    const ema21 = emaCalc(21);
+    const isBull = ema9 > ema21;
 
-    const range = Math.max(last.high - last.low, 0.00001);
-    const upperWick = last.high - Math.max(last.open, last.close);
-    const lowerWick = Math.min(last.open, last.close) - last.low;
-    const isLowerRejection = lowerWick / range > 0.45;
-    const isUpperRejection = upperWick / range > 0.45;
+    // Evaluate latest closed candle crossover + lookback confirmation
+    const sig =
+      detectStochRsiSweepSignal(cs, n - 1, undefined, series) ??
+      (n >= 19 ? detectStochRsiSweepSignal(cs, n - 2, undefined, series) : null);
 
     let side: "buy" | "sell" | "neutral" = "neutral";
     let conf = 50;
-    let signalName = "Scanning";
-    let sweepReason = "Normal range";
+    let signalName = "SCANNING STOCH+RSI";
+    let sweepReason = `Stoch %K ${k.toFixed(1)} / %D ${d.toFixed(1)} · RSI ${rsi.toFixed(1)}`;
 
-    if (isLowerRejection || (rsi < 36 && last.close > last.open)) {
+    if (sig) {
+      side = sig.side === "BUY" ? "buy" : "sell";
+      conf = sig.confidenceScore;
+      signalName = sig.side === "BUY" ? "STOCH+RSI BUY SETUP" : "STOCH+RSI SELL SETUP";
+      sweepReason = sig.reasons.join(" · ");
+    } else if (k <= 20 && rsi <= 35) {
       side = "buy";
-      conf = Math.min(94, 65 + Math.round((40 - Math.min(40, rsi)) * 0.6) + (isBull ? 8 : 0));
-      signalName = "STRONG RISE SETUP";
-      sweepReason = isLowerRejection ? "Liquidity sweep below lows with wick rejection" : "Oversold RSI rebound confirmed";
-    } else if (isUpperRejection || (rsi > 64 && last.close < last.open)) {
+      conf = 62;
+      signalName = "OVERSOLD WATCH";
+      sweepReason = `Stoch(14,3,3) ${k.toFixed(1)}/${d.toFixed(1)} · RSI(14) ${rsi.toFixed(1)} waiting cross up`;
+    } else if (k >= 80 && rsi >= 65) {
       side = "sell";
-      conf = Math.min(94, 65 + Math.round((Math.max(60, rsi) - 60) * 0.6) + (!isBull ? 8 : 0));
-      signalName = "STRONG FALL SETUP";
-      sweepReason = isUpperRejection ? "Liquidity sweep above highs with wick rejection" : "Overbought RSI exhaustion confirmed";
-    } else if (isBull) {
-      side = "buy";
-      conf = 68;
-      signalName = "TRENDING RISE";
-      sweepReason = "EMA ribbon expansion & buyer volume";
-    } else {
-      side = "sell";
-      conf = 67;
-      signalName = "TRENDING FALL";
-      sweepReason = "EMA ribbon downward slope & seller volume";
+      conf = 62;
+      signalName = "OVERBOUGHT WATCH";
+      sweepReason = `Stoch(14,3,3) ${k.toFixed(1)}/${d.toFixed(1)} · RSI(14) ${rsi.toFixed(1)} waiting cross down`;
     }
 
     const first = cs[0].open;
@@ -758,7 +894,9 @@ export default function SignalPackageAgents({
       signalName,
       sweepReason,
       rsi,
-      trend: isBull ? "Bullish" : "Bearish",
+      stochK: Math.round(k * 10) / 10,
+      stochD: Math.round(d * 10) / 10,
+      trend: Math.abs(ema9 - ema21) / Math.max(cur, 1e-9) < 0.00005 ? "Consolidating" : isBull ? "Bullish" : "Bearish",
     };
   };
 
@@ -771,7 +909,7 @@ export default function SignalPackageAgents({
       await Promise.all(
         symbols.map(async (sym) => {
           try {
-            const res = await apiFetch(`${http}/api/deriv/synthetic-candles?symbol=${encodeURIComponent(sym)}&tf=${globalTf}&count=35`);
+            const res = await apiFetch(`${http}/api/deriv/synthetic-candles?symbol=${encodeURIComponent(sym)}&tf=${globalTf}&count=90`);
             if (res.ok) {
               const data = await res.json();
               const cs: MiniCandle[] = Array.isArray(data.candles) ? data.candles : [];
@@ -785,9 +923,11 @@ export default function SignalPackageAgents({
                 low: evalRes.low ?? 0,
                 side: evalRes.side ?? "neutral",
                 confidence: evalRes.confidence ?? 50,
-                signalName: evalRes.signalName ?? "Scanning",
+                signalName: evalRes.signalName ?? "SCANNING STOCH+RSI",
                 sweepReason: evalRes.sweepReason ?? "",
                 rsi: evalRes.rsi ?? 50,
+                stochK: evalRes.stochK ?? 50,
+                stochD: evalRes.stochD ?? 50,
                 trend: evalRes.trend ?? "Consolidating",
               };
             }
@@ -1318,9 +1458,15 @@ export default function SignalPackageAgents({
                   </span>
                 </button>
               ) : (
-                <div className="flex items-center justify-between p-3.5 bg-[#050914] border border-[#14203b] rounded-2xl text-xs font-mono">
-                  <span className="text-slate-400">Agent Strategy Monitor:</span>
-                  <span className="text-slate-300">Scanning Deriv live market tick flow ({activeTfShort})...</span>
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3.5 bg-[#050914] border border-[#14203b] rounded-2xl text-xs font-mono">
+                  <span className="text-slate-400">
+                    Stoch(14,3,3) + RSI(14) Monitor:
+                  </span>
+                  <span className="text-slate-200">
+                    {agentStates[activeAgent.symbol]
+                      ? `${agentStates[activeAgent.symbol].signalName} · Stoch %K ${agentStates[activeAgent.symbol].stochK.toFixed(1)} / %D ${agentStates[activeAgent.symbol].stochD.toFixed(1)} · RSI ${agentStates[activeAgent.symbol].rsi.toFixed(1)}`
+                      : `Scanning Deriv live market tick flow (${activeTfShort})...`}
+                  </span>
                 </div>
               )}
             </div>

@@ -10,10 +10,11 @@ import { validOhlc } from './candleMath';
 import { detectMomentumSignal } from './momentumEngine';
 import { findLsccSweep } from './lscc';
 import { analyzeStructureSweep } from './structureSweep';
+import { computeIndicatorSeries, evaluateIndicatorCrossover, findLookbackConfirmations } from './stochRsiSweep';
 
 export interface Bar { time: number; open: number; high: number; low: number; close: number }
 export type Side = 'BUY' | 'SELL';
-export type SweepEngineKey = 'sweep' | 'continuation' | 'momentum' | 'lscc' | 'structure_sweep';
+export type SweepEngineKey = 'sweep' | 'continuation' | 'momentum' | 'lscc' | 'structure_sweep' | 'stoch_rsi_sweep';
 
 export interface RuleResult { id: string; engine: SweepEngineKey; pass: boolean; detail: string }
 export type PatternStatus = 'VALID' | 'INVALID' | 'INSUFFICIENT_EVIDENCE' | 'NOT_APPLICABLE';
@@ -61,9 +62,12 @@ export const RULE_TEXT: Record<string, string> = {
   STRUCT_SWEEP_DIRECTION: 'Structure Sweep: BUY requires a bullish/green sweep candle; SELL requires a bearish/red sweep candle.',
   STRUCT_WICK_PENETRATION: 'Structure Sweep: BUY sweep low strictly below pullback low; SELL sweep high strictly above pullback high.',
   STRUCT_CLOSE_RECOVERY: 'Structure Sweep: BUY sweep candle closes strictly above pullback low; SELL closes strictly below pullback high.',
+  IND_STOCH_CROSS_ZONE: 'Stoch+RSI+Confirm: BUY requires Stochastic(14,3,3) %K crossing up from <=20; SELL requires %K crossing down from >=80.',
+  IND_RSI_CROSS_LEVEL: 'Stoch+RSI+Confirm: BUY requires RSI(14) crossing up from <=30 or through 50; SELL requires RSI crossing down from >=70 or through 50.',
+  IND_LOOKBACK_CANDLE_CONFIRM: 'Stoch+RSI+Confirm: recent closed candles (lookback window) must contain an aligned Wick Sweep or Candlestick Pattern confirming the indicator direction.',
 };
 
-const WINDOW: Record<SweepEngineKey, number> = { sweep: 2, continuation: 4, momentum: 3, lscc: 12, structure_sweep: 15 };
+const WINDOW: Record<SweepEngineKey, number> = { sweep: 2, continuation: 4, momentum: 3, lscc: 12, structure_sweep: 15, stoch_rsi_sweep: 17 };
 
 export interface EngineClaims {
   side: Side | null;
@@ -72,6 +76,7 @@ export interface EngineClaims {
   momentum?: { side: Side } | null;
   lscc?: { side: Side } | null;
   structure_sweep?: { side: Side } | null;
+  stoch_rsi_sweep?: { side: Side } | null;
 }
 
 export function claimedEngines(e: EngineClaims): { engine: SweepEngineKey; side: Side }[] {
@@ -81,6 +86,7 @@ export function claimedEngines(e: EngineClaims): { engine: SweepEngineKey; side:
   if (e.momentum) out.push({ engine: 'momentum', side: e.momentum.side });
   if (e.lscc) out.push({ engine: 'lscc', side: e.lscc.side });
   if (e.structure_sweep) out.push({ engine: 'structure_sweep', side: e.structure_sweep.side });
+  if (e.stoch_rsi_sweep) out.push({ engine: 'stoch_rsi_sweep', side: e.stoch_rsi_sweep.side });
   return out;
 }
 
@@ -209,6 +215,37 @@ function structureSweepRules(cs: Bar[], side: Side): RuleResult[] {
   ];
 }
 
+function stochRsiSweepRules(cs: Bar[], side: Side): RuleResult[] {
+  const n = cs.length - 1;
+  const series = computeIndicatorSeries(cs);
+  const cross = evaluateIndicatorCrossover(series, n);
+  const confs = findLookbackConfirmations(cs, n, side);
+  const k = series.stochK[n], pk = series.stochK[Math.max(0, n - 1)];
+  const r = series.rsi[n], pr = series.rsi[Math.max(0, n - 1)];
+  const stochOk = !!cross && cross.side === side;
+  const rsiOk = !!cross && cross.side === side;
+  return [
+    rule(
+      'stoch_rsi_sweep',
+      'IND_STOCH_CROSS_ZONE',
+      stochOk,
+      stochOk ? cross!.stochTrigger : `Stoch %K ${pk.toFixed(1)} -> ${k.toFixed(1)} does not confirm ${side} crossover from ${side === 'BUY' ? '<=20' : '>=80'}`
+    ),
+    rule(
+      'stoch_rsi_sweep',
+      'IND_RSI_CROSS_LEVEL',
+      rsiOk,
+      rsiOk ? cross!.rsiTrigger : `RSI(14) ${pr.toFixed(1)} -> ${r.toFixed(1)} does not confirm ${side} cross from ${side === 'BUY' ? '<=30/50' : '>=70/50'}`
+    ),
+    rule(
+      'stoch_rsi_sweep',
+      'IND_LOOKBACK_CANDLE_CONFIRM',
+      confs.length > 0,
+      confs.length > 0 ? `Lookback confirmations: ${confs.map((c) => c.label).slice(0, 3).join(', ')}` : `No aligned ${side} wick sweep or candlestick pattern in lookback candles`
+    ),
+  ];
+}
+
 /**
  * Recomputes the pattern the engines claimed. `closed` = closed candles only, oldest first, the last one is the signal candle.
  * `expectedSignalTime` = open time of the candle the signal belongs to (the same value the AI request and the screenshot carry).
@@ -240,6 +277,11 @@ export function verifyPattern(claims: EngineClaims, closed: Bar[], expectedSigna
     else if (c.engine === 'continuation') { rules.push(...continuationRules(closed, c.side)); level ??= c.side === 'SELL' ? closed[closed.length - 4].high : closed[closed.length - 4].low; }
     else if (c.engine === 'lscc') { rules.push(...lsccRules(closed.slice(-60), c.side)); level ??= findLsccSweep(closed.slice(-60), closed.slice(-60).length - 2)?.level ?? null; }
     else if (c.engine === 'structure_sweep') { rules.push(...structureSweepRules(closed.slice(-60), c.side)); level ??= c.side === 'SELL' ? closed[closed.length - 2].high : closed[closed.length - 2].low; }
+    else if (c.engine === 'stoch_rsi_sweep') {
+      const sub = closed.slice(-60);
+      rules.push(...stochRsiSweepRules(sub, c.side));
+      level ??= findLookbackConfirmations(sub, sub.length - 1, c.side)[0]?.level ?? null;
+    }
     else rules.push(...momentumRules(closed.slice(-300), c.side));
   }
   const failed = rules.some((r) => !r.pass);

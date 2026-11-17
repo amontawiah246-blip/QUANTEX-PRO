@@ -69,28 +69,50 @@ function startInternalBridge() {
     }
   });
 
-  bridgeApp.post('/api/set-credentials', (req, res) => {
+  bridgeApp.post('/api/set-credentials', async (req, res) => {
     const raw = String(req.body?.ssid || req.body?.email || req.body?.password || '').trim();
     if (!raw) {
       return res.status(400).json({ status: 'error', msg: 'Please provide a valid Deriv API token (pat_...)' });
     }
-    derivBridge.setCredentials(raw);
-    res.json({ status: 'ok', msg: 'Deriv API Credentials saved. Connecting & authenticating...' });
+    const authRes = await derivBridge.setCredentials(raw);
+    if (!authRes.ok) {
+      return res.status(400).json({ status: 'error', msg: authRes.msg, tradable: derivBridge.tradable });
+    }
+    res.json({
+      status: 'ok',
+      msg: authRes.msg,
+      tradable: derivBridge.tradable,
+      balance: derivBridge.balance,
+      demo: derivBridge.isDemo,
+    });
   });
 
-  bridgeApp.post('/api/set-ssid', (req, res) => {
+  bridgeApp.post('/api/set-ssid', async (req, res) => {
     const raw = String(req.body?.ssid || '').trim();
     if (!raw) {
       return res.status(400).json({ status: 'error', msg: 'Empty token' });
     }
-    derivBridge.setCredentials(raw);
-    res.json({ status: 'ok', msg: 'Deriv token updated' });
+    const authRes = await derivBridge.setCredentials(raw);
+    if (!authRes.ok) {
+      return res.status(400).json({ status: 'error', msg: authRes.msg, tradable: derivBridge.tradable });
+    }
+    res.json({
+      status: 'ok',
+      msg: authRes.msg,
+      tradable: derivBridge.tradable,
+      balance: derivBridge.balance,
+      demo: derivBridge.isDemo,
+    });
   });
 
   bridgeApp.post('/api/account', async (req, res) => {
     const demo = Boolean(req.body?.demo);
-    const result = await derivBridge.setAccount(demo);
-    res.json({ status: 'ok', demo: derivBridge.isDemo, balance: derivBridge.balance, msg: result.msg });
+    try {
+      const result = await derivBridge.setAccount(demo);
+      res.json({ status: 'ok', demo: derivBridge.isDemo, balance: derivBridge.balance, tradable: derivBridge.tradable, msg: result.msg });
+    } catch (err: any) {
+      res.status(400).json({ status: 'error', demo: derivBridge.isDemo, balance: derivBridge.balance, tradable: derivBridge.tradable, msg: err?.message || 'Failed to switch account' });
+    }
   });
 
   bridgeApp.post('/api/trade', async (req, res) => {
@@ -383,7 +405,7 @@ async function main() {
       const response = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/api/set-ssid`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body),
       });
-      res.json(await response.json());
+      res.status(response.status).json(await response.json());
     } catch (e: any) {
       res.status(500).json({ status: 'error', msg: e.message });
     }
@@ -394,7 +416,7 @@ async function main() {
       const response = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/api/set-credentials`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body),
       });
-      res.json(await response.json());
+      res.status(response.status).json(await response.json());
     } catch (e: any) {
       res.status(500).json({ status: 'error', msg: e.message });
     }
@@ -405,7 +427,7 @@ async function main() {
       const response = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/api/account`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body),
       });
-      res.json(await response.json());
+      res.status(response.status).json(await response.json());
     } catch (e: any) {
       res.status(500).json({ status: 'error', msg: e.message });
     }

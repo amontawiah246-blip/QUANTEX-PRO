@@ -65,6 +65,7 @@ export class DerivBridge {
   public token: string = '';
   public appId: string = '34QcI4Rf8S5tCkL6PMOcI';
   public accountId: string = '';
+  private preferredAccountId: string = '';
   public ready: boolean = false;
   public error: string = '';
   public authError: string = '';
@@ -84,20 +85,27 @@ export class DerivBridge {
   private authReqId = 1000;
   private tickSubscribers = new Map<string, Set<(price: number, epoch: number) => void>>();
   private tickSubIds = new Map<string, string>();
-  private reconnectTimer: NodeJS.Timeout | null = null;
+  private publicReconnectTimer: NodeJS.Timeout | null = null;
+  private authReconnectTimer: NodeJS.Timeout | null = null;
+  private publicPingTimer: NodeJS.Timeout | null = null;
+  private authPingTimer: NodeJS.Timeout | null = null;
+  private authInitPromise: Promise<void> | null = null;
 
   constructor() {
     this.loadToken();
     this.connectPublicWs();
-    this.initAuth();
+    void this.initAuth();
   }
 
   private loadToken() {
-    let rawToken = process.env.DERIV_TOKEN || process.env.DERIV_API_KEY || '';
-    if (!rawToken && fs.existsSync(SESSION_FILE)) {
+    let rawToken = '';
+    if (fs.existsSync(SESSION_FILE)) {
       try {
         rawToken = fs.readFileSync(SESSION_FILE, 'utf-8').trim();
       } catch {}
+    }
+    if (!rawToken) {
+      rawToken = process.env.DERIV_TOKEN || process.env.DERIV_API_KEY || '';
     }
     if (!rawToken) {
       rawToken = 'pat_12430e9f3555e6dd3a2ad5bb86555b0a530667adbd0b8efd1f97b3abdcdaf106';
@@ -107,33 +115,78 @@ export class DerivBridge {
 
   public parseTokenString(raw: string) {
     const parts = raw.split('|').map(p => p.trim());
-    if (parts[0]) this.token = parts[0];
-    if (parts[1]) this.appId = parts[1];
-    if (parts[2]) this.accountId = parts[2];
+    this.token = parts[0] || '';
+    this.appId = parts[1] || '34QcI4Rf8S5tCkL6PMOcI';
+    this.preferredAccountId = parts[2] || '';
+    if (this.preferredAccountId) this.accountId = this.preferredAccountId;
   }
 
-  public setCredentials(raw: string) {
+  public async setCredentials(raw: string): Promise<{ ok: boolean; msg: string }> {
     this.parseTokenString(raw);
     try {
       fs.writeFileSync(SESSION_FILE, raw);
     } catch {}
+    if (this.authReconnectTimer) {
+      clearTimeout(this.authReconnectTimer);
+      this.authReconnectTimer = null;
+    }
+    if (this.authPingTimer) {
+      clearInterval(this.authPingTimer);
+      this.authPingTimer = null;
+    }
+    const prevWs = this.authWs;
+    this.authWs = null;
+    if (prevWs) {
+      try { prevWs.close(); } catch {}
+    }
     this.authError = '';
     this.balance = null;
-    this.initAuth();
+    this.authInitPromise = null;
+    try {
+      await this.ensureAuthConnected(15000);
+      return {
+        ok: true,
+        msg: `Connected to Deriv (${this.isDemo ? 'DEMO' : 'REAL'} · ${this.accountId})`,
+      };
+    } catch (err: any) {
+      return { ok: false, msg: err?.message || this.authError || 'Failed to authenticate Deriv token' };
+    }
   }
 
   // --- 1. Public Market Data Connection ---
   private connectPublicWs() {
+    if (this.publicReconnectTimer) {
+      clearTimeout(this.publicReconnectTimer);
+      this.publicReconnectTimer = null;
+    }
+    if (this.publicPingTimer) {
+      clearInterval(this.publicPingTimer);
+      this.publicPingTimer = null;
+    }
+    const prevWs = this.publicWs;
+    this.publicWs = null;
+    if (prevWs) {
+      try { prevWs.close(); } catch {}
+    }
+
     const primaryUrl = 'wss://api.derivws.com/trading/v1/options/ws/public';
     console.log(`[DerivBridge] Connecting public market stream to ${primaryUrl}...`);
 
     try {
-      this.publicWs = new WebSocket(primaryUrl, { headers: WS_HEADERS });
+      const ws = new WebSocket(primaryUrl, { headers: WS_HEADERS });
+      this.publicWs = ws;
 
-      this.publicWs.on('open', () => {
+      ws.on('open', () => {
+        if (ws !== this.publicWs) return;
         console.log(`[DerivBridge] Public Market Data Connected`);
         this.ready = true;
         this.error = '';
+
+        this.publicPingTimer = setInterval(() => {
+          if (ws === this.publicWs && ws.readyState === WebSocket.OPEN) {
+            this.requestPublic({ ping: 1 }).catch(() => {});
+          }
+        }, 25000);
 
         // Re-subscribe any pending tick subscribers
         for (const sym of this.tickSubscribers.keys()) {
@@ -169,7 +222,8 @@ export class DerivBridge {
         }).catch(() => {});
       });
 
-      this.publicWs.on('message', (data: any) => {
+      ws.on('message', (data: any) => {
+        if (ws !== this.publicWs) return;
         try {
           const msg = JSON.parse(data.toString());
           if (msg.req_id && this.pendingPublicRequests.has(msg.req_id)) {
@@ -194,14 +248,30 @@ export class DerivBridge {
         } catch {}
       });
 
-      this.publicWs.on('error', (err) => {
+      ws.on('error', (err) => {
+        if (ws !== this.publicWs) return;
         console.warn(`[DerivBridge] Public WS Warning: ${err.message}`);
         this.ready = false;
       });
 
-      this.publicWs.on('close', () => {
+      ws.on('close', () => {
+        if (ws !== this.publicWs) return;
         this.ready = false;
-        setTimeout(() => this.connectPublicWs(), 4000);
+        this.publicWs = null;
+        if (this.publicPingTimer) {
+          clearInterval(this.publicPingTimer);
+          this.publicPingTimer = null;
+        }
+        for (const [id, p] of this.pendingPublicRequests.entries()) {
+          this.pendingPublicRequests.delete(id);
+          p.reject(new Error('Deriv Public WS closed'));
+        }
+        if (!this.publicReconnectTimer) {
+          this.publicReconnectTimer = setTimeout(() => {
+            this.publicReconnectTimer = null;
+            this.connectPublicWs();
+          }, 3000);
+        }
       });
     } catch (err: any) {
       this.error = `Failed to connect public market WS: ${err.message}`;
@@ -209,7 +279,19 @@ export class DerivBridge {
   }
 
   // --- 2. Authenticated Account Connection via REST OTP ---
-  public async initAuth() {
+  public async initAuth(): Promise<void> {
+    if (this.authInitPromise) return this.authInitPromise;
+    this.authInitPromise = this.doInitAuth().finally(() => {
+      this.authInitPromise = null;
+    });
+    return this.authInitPromise;
+  }
+
+  private async doInitAuth(): Promise<void> {
+    if (this.authReconnectTimer) {
+      clearTimeout(this.authReconnectTimer);
+      this.authReconnectTimer = null;
+    }
     if (!this.token || this.token.startsWith('MY_')) {
       this.authError = 'No Deriv API Token configured. Enter your PAT on the API screen.';
       return;
@@ -218,6 +300,11 @@ export class DerivBridge {
     try {
       // Step A: Fetch accounts list
       const accountsRes = await this.httpApiGet('/trading/v1/options/accounts');
+      const apiErr = accountsRes?.errors?.[0]?.message || accountsRes?.error?.message;
+      if (apiErr) {
+        this.authError = `Deriv Auth Error: ${apiErr}`;
+        return;
+      }
       if (!accountsRes || !Array.isArray(accountsRes.data) || accountsRes.data.length === 0) {
         this.authError = 'No Deriv accounts found on this token';
         return;
@@ -230,19 +317,31 @@ export class DerivBridge {
         account_type: a.account_type
       }));
 
-      // Find matching account (demo vs real)
-      let selectedAcc = accList.find((a: any) => (a.account_type === 'demo') === this.isDemo);
+      // Find matching account (explicit ID if provided, otherwise demo vs real)
+      let selectedAcc = this.preferredAccountId
+        ? accList.find((a: any) => a.account_id === this.preferredAccountId && (a.account_type === 'demo') === this.isDemo)
+          ?? accList.find((a: any) => a.account_id === this.preferredAccountId)
+        : undefined;
+      if (!selectedAcc) {
+        selectedAcc = accList.find((a: any) => (a.account_type === 'demo') === this.isDemo);
+      }
       if (!selectedAcc) selectedAcc = accList[0];
 
       this.accountId = selectedAcc.account_id;
       this.balance = Number(selectedAcc.balance || 0);
       this.currency = selectedAcc.currency || 'USD';
       this.isDemo = selectedAcc.account_type === 'demo';
+      this.authError = '';
 
       console.log(`[DerivBridge] Deriv Account Identified: ${this.accountId} (${this.isDemo ? 'DEMO' : 'REAL'}). Balance: ${this.balance} ${this.currency}`);
 
       // Step B: Fetch OTP WebSocket URL
       const otpRes = await this.httpApiPost(`/trading/v1/options/accounts/${this.accountId}/otp`);
+      const otpErr = otpRes?.errors?.[0]?.message || otpRes?.error?.message;
+      if (otpErr) {
+        this.authError = `Failed to obtain Deriv OTP session: ${otpErr}`;
+        return;
+      }
       if (!otpRes || !otpRes.data || !otpRes.data.url) {
         this.authError = 'Failed to obtain Deriv OTP session';
         return;
@@ -257,22 +356,35 @@ export class DerivBridge {
   }
 
   private connectAuthWs(otpUrl: string) {
-    if (this.authWs) {
-      try { this.authWs.close(); } catch {}
-      this.authWs = null;
+    if (this.authPingTimer) {
+      clearInterval(this.authPingTimer);
+      this.authPingTimer = null;
+    }
+    const prevWs = this.authWs;
+    this.authWs = null;
+    if (prevWs) {
+      try { prevWs.close(); } catch {}
     }
 
     try {
-      this.authWs = new WebSocket(otpUrl, { headers: WS_HEADERS });
+      const ws = new WebSocket(otpUrl, { headers: WS_HEADERS });
+      this.authWs = ws;
 
-      this.authWs.on('open', () => {
+      ws.on('open', () => {
+        if (ws !== this.authWs) return;
         console.log(`[DerivBridge] Authenticated Deriv Session Opened (${this.accountId})`);
         this.authError = '';
-        // Subscribe to live balance updates
+        // Subscribe to live balance updates & keepalive ping so Deriv never drops idle sessions
         this.requestAuth({ balance: 1, subscribe: 1 }).catch(() => {});
+        this.authPingTimer = setInterval(() => {
+          if (ws === this.authWs && ws.readyState === WebSocket.OPEN) {
+            this.requestAuth({ ping: 1 }).catch(() => {});
+          }
+        }, 25000);
       });
 
-      this.authWs.on('message', (data: any) => {
+      ws.on('message', (data: any) => {
+        if (ws !== this.authWs) return;
         try {
           const msg = JSON.parse(data.toString());
           if (msg.req_id && this.pendingAuthRequests.has(msg.req_id)) {
@@ -288,13 +400,29 @@ export class DerivBridge {
         } catch {}
       });
 
-      this.authWs.on('error', (err) => {
+      ws.on('error', (err) => {
+        if (ws !== this.authWs) return;
         console.warn(`[DerivBridge] Auth WS warning: ${err.message}`);
       });
 
-      this.authWs.on('close', () => {
-        console.log(`[DerivBridge] Auth WS closed. Will refresh OTP in 10s...`);
-        setTimeout(() => this.initAuth(), 10000);
+      ws.on('close', () => {
+        if (ws !== this.authWs) return;
+        this.authWs = null;
+        if (this.authPingTimer) {
+          clearInterval(this.authPingTimer);
+          this.authPingTimer = null;
+        }
+        for (const [id, p] of this.pendingAuthRequests.entries()) {
+          this.pendingAuthRequests.delete(id);
+          p.reject(new Error('Deriv Auth WS not connected'));
+        }
+        console.log(`[DerivBridge] Auth WS closed. Refreshing OTP in 2s...`);
+        if (!this.authReconnectTimer) {
+          this.authReconnectTimer = setTimeout(() => {
+            this.authReconnectTimer = null;
+            void this.initAuth();
+          }, 2000);
+        }
       });
     } catch (err: any) {
       this.authError = `Auth WS Error: ${err.message}`;
@@ -321,6 +449,9 @@ export class DerivBridge {
         res.on('end', () => {
           try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
         });
+      });
+      req.setTimeout(12000, () => {
+        req.destroy(new Error('Deriv REST GET timeout'));
       });
       req.on('error', reject);
       req.end();
@@ -349,6 +480,9 @@ export class DerivBridge {
         res.on('end', () => {
           try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
         });
+      });
+      req.setTimeout(12000, () => {
+        req.destroy(new Error('Deriv REST POST timeout'));
       });
       req.on('error', reject);
       req.write(payload);
@@ -536,17 +670,51 @@ export class DerivBridge {
     }
   }
 
+  public async ensureAuthConnected(timeoutMs = 15000): Promise<void> {
+    if (this.authWs && this.authWs.readyState === WebSocket.OPEN) return;
+    if (!this.token || this.token.startsWith('MY_')) {
+      throw new Error('Deriv account not connected. Please enter your Deriv PAT Token on the API screen.');
+    }
+
+    if (!this.authWs || this.authWs.readyState === WebSocket.CLOSED || this.authWs.readyState === WebSocket.CLOSING) {
+      await this.initAuth();
+    }
+
+    if (this.authError && (!this.authWs || this.authWs.readyState === WebSocket.CLOSED)) {
+      throw new Error(this.authError);
+    }
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.authWs && this.authWs.readyState === WebSocket.OPEN) return;
+      if (this.authError && !this.authInitPromise && (!this.authWs || this.authWs.readyState === WebSocket.CLOSED)) {
+        throw new Error(this.authError);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(this.authError || 'Deriv account not connected. Please enter your Deriv PAT Token on the API screen.');
+  }
+
   // --- Account & Trade Operations ---
   public async setAccount(demo: boolean): Promise<{ ok: boolean; msg: string }> {
     this.isDemo = demo;
-    await this.initAuth();
-    return { ok: true, msg: `Switched to ${demo ? 'Demo' : 'Real'} account (${this.accountId})` };
+    this.preferredAccountId = '';
+    if (this.authReconnectTimer) {
+      clearTimeout(this.authReconnectTimer);
+      this.authReconnectTimer = null;
+    }
+    const prevWs = this.authWs;
+    this.authWs = null;
+    if (prevWs) {
+      try { prevWs.close(); } catch {}
+    }
+    this.authInitPromise = null;
+    await this.ensureAuthConnected(15000);
+    return { ok: true, msg: `Switched to ${this.isDemo ? 'Demo' : 'Real'} account (${this.accountId})` };
   }
 
   public async placeTrade(asset: string, side: 'buy' | 'sell', amount: number, seconds: number): Promise<any> {
-    if (!this.authWs || this.authWs.readyState !== WebSocket.OPEN) {
-      throw new Error('Deriv account not connected. Please enter your Deriv PAT Token on the API screen.');
-    }
+    await this.ensureAuthConnected(15000);
 
     const contractType = side.toLowerCase() === 'buy' ? 'CALL' : 'PUT';
     const resolvedAsset = this.getSymbolAliases(asset)[0] || asset;
@@ -568,8 +736,20 @@ export class DerivBridge {
         ...baseProposal,
         underlying_symbol: resolvedAsset
       });
-    } catch {
-      propRes = null;
+    } catch (err: any) {
+      if (String(err?.message || '').includes('not connected')) {
+        await this.ensureAuthConnected(15000);
+        try {
+          propRes = await this.requestAuth({
+            ...baseProposal,
+            underlying_symbol: resolvedAsset
+          });
+        } catch {
+          propRes = null;
+        }
+      } else {
+        propRes = null;
+      }
     }
 
     if (!propRes || propRes.error) {
@@ -616,6 +796,9 @@ export class DerivBridge {
     const end = Date.now() + (safeTimeout * 1000);
     while (Date.now() < end) {
       try {
+        if (!this.tradable) {
+          await this.ensureAuthConnected(10000);
+        }
         const res = await this.requestAuth({
           proposal_open_contract: 1,
           contract_id: Number(contractId)

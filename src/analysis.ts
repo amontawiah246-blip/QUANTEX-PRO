@@ -3,6 +3,7 @@
 // The confidence number says how strongly the indicators agree, it is NOT a probability of winning.
 
 import type { LiveConfidence } from "./liveConfidence";
+import { computeIndicatorSeries, detectStochRsiSweepSignal, findLookbackConfirmations } from "./stochRsiSweep";
 export interface Candle { time: number; open: number; high: number; low: number; close: number }
 export type Side = "buy" | "sell";
 export interface Reason { text: string; bias: Side | "neutral" }
@@ -73,15 +74,21 @@ export function bollingerPct(closes: number[], period = 20, mult = 2): number {
 }
 
 export function stochastic(c: Candle[], period = 14): { k: number; d: number } {
-  const ks: number[] = [];
-  for (let i = Math.max(period - 1, c.length - 5); i < c.length; i++) {
-    const w = c.slice(i - period + 1, i + 1);
-    const hi = Math.max(...w.map((x) => x.high)), lo = Math.min(...w.map((x) => x.low));
-    ks.push(hi === lo ? 50 : ((c[i].close - lo) / (hi - lo)) * 100);
-  }
-  const k = last(ks);
-  const d3 = ks.slice(-3);
-  return { k, d: d3.reduce((a, b) => a + b, 0) / d3.length };
+  if (c.length === 0) return { k: 50, d: 50 };
+  const s = computeIndicatorSeries(c, {
+    stochKPeriod: period,
+    stochSmoothK: 3,
+    stochDPeriod: 3,
+    stochOversold: 20,
+    stochOverbought: 80,
+    rsiPeriod: 14,
+    rsiOversold: 30,
+    rsiMid: 50,
+    rsiOverbought: 70,
+    lookbackCandles: 5,
+    alignWindow: 4,
+  });
+  return { k: last(s.stochK), d: last(s.stochD) };
 }
 
 /** Pivot highs / lows (two candles each side) over the recent window. */
@@ -112,6 +119,25 @@ export function analyze(candles: Candle[]): Analysis | null {
   const st = stochastic(c);
   const { highs, lows } = levels(c.slice(0, -1));
   const cur = last(c), prev = last(c, 2);
+  const flat = A / price < 2e-5;
+
+  if (!flat) {
+    const srs = detectStochRsiSweepSignal(c, c.length - 1);
+    if (srs) {
+      const conf = Math.round(clamp(srs.confidenceScore, 55, 94));
+      const strength: Strength = conf < 60 ? "Low" : conf < 72 ? "Medium" : conf < 84 ? "High" : "Very high";
+      const biasSide: Side = srs.side === "BUY" ? "buy" : "sell";
+      return {
+        side: biasSide,
+        confidence: conf,
+        strength,
+        score: biasSide === "buy" ? 0.85 : -0.85,
+        price,
+        reasons: srs.reasons.map((text) => ({ text, bias: biasSide })),
+        stats: { rsi: srs.rsi, macd: hist, ema9: last(e9), ema21: last(e21), ema50: last(e50), bb: pb, stochK: srs.stochK, atr: A },
+      };
+    }
+  }
 
   const votes: Vote[] = [];
 
@@ -200,6 +226,20 @@ export function analyze(candles: Candle[]): Analysis | null {
   }
   votes.push({ w: 0.9, s: ls, buy: lsBuy || "There is more room up to resistance than down to support", sell: lsSell || "There is more room down to support than up to resistance" });
 
+  // 9. oversold/overbought reversal turning with lookback wick sweep or candlestick pattern
+  const prevRsi = rsi(closes.slice(0, -1));
+  const buyLookback = r <= 35 && r > prevRsi && !flat ? findLookbackConfirmations(c, c.length - 1, "BUY", 5) : [];
+  const sellLookback = r >= 65 && r < prevRsi && !flat ? findLookbackConfirmations(c, c.length - 1, "SELL", 5) : [];
+  const lbScore = buyLookback.length > 0 ? 0.85 : sellLookback.length > 0 ? -0.85 : 0;
+  if (lbScore !== 0) {
+    votes.push({
+      w: 0.8,
+      s: fade(lbScore),
+      buy: `Oversold RSI (${r.toFixed(1)}) backed by ${buyLookback[0]?.label ?? "lookback confirmation"}`,
+      sell: `Overbought RSI (${r.toFixed(1)}) backed by ${sellLookback[0]?.label ?? "lookback confirmation"}`,
+    });
+  }
+
   const totalW = votes.reduce((a, v) => a + v.w, 0);
   const score = votes.reduce((a, v) => a + v.w * v.s, 0) / totalW;
   const side: Side = score >= 0 ? "buy" : "sell";
@@ -211,7 +251,6 @@ export function analyze(candles: Candle[]): Analysis | null {
   const agree = agreeW / allW;
 
   let conf = 50 + 40 * Math.min(1, Math.abs(score) / 0.55) + (agree - 0.6) * 14;
-  const flat = A / price < 2e-5;
   if (flat) conf -= 8;
   conf = Math.round(clamp(conf, 51, 94));
   const strength: Strength = conf < 60 ? "Low" : conf < 72 ? "Medium" : conf < 84 ? "High" : "Very high";

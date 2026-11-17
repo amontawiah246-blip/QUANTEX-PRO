@@ -5,6 +5,7 @@ import { resolveExpiry } from './executionConfig';
 import { HybridEngine, HybridView, viewOf } from './hybridEngine';
 import { hybridConfig } from './hybridConfig';
 import { HybridModel, loadModel } from './hybridModel';
+import { computeIndicatorSeries, detectStochRsiSweepSignal } from './stochRsiSweep';
 
 export interface CandleData {
   time: number;
@@ -29,12 +30,15 @@ export interface EngineResultData {
   momentum?: { side: 'BUY' | 'SELL'; reasons: string[] } | null;       // 3 strong candles in a row: trade the next open
   lscc?: { side: 'BUY' | 'SELL'; reasons: string[] } | null;           // liquidity sweep + a separate confirmation candle: trade the next open
   structureSweep?: { side: 'BUY' | 'SELL'; reasons: string[]; biasDirection?: string; eventType?: string; breakLevel?: number } | null;
+  stochRsiSweep?: { side: 'BUY' | 'SELL'; reasons: string[]; stochK: number; stochD: number; rsi: number; confirmations: string[] } | null;
   reasons: string[];
   /** Engines 7-12 (structure, repeated sweeps, confirmation). Additive: it never changes `setup`, `side`, `confidence` or the votes above. */
   intelligence?: IntelligenceView;
   /** Hybrid price-action layer (candlestick setup + ADX/ATR/EMA evidence + calibrated probability). Never changes `setup`, `side`, `confidence` or the votes. AutoTrading consumes it only through src/hybridGate.ts (veto-only by default). */
   hybrid?: HybridView;
   rsi?: number;
+  stochK?: number;
+  stochD?: number;
   trend?: string;
 }
 
@@ -143,55 +147,43 @@ function evaluateEnginesCore(candles: CandleData[], tf: number = getGlobalTiming
       }
     : null;
 
-  // 2. Technical Indicators Engine (RSI, EMA, Bollinger, CCI)
-  let indSide: 'BUY' | 'SELL' | null = null;
-  const indStrategies: string[] = [];
+  // 2. Stochastic(14,3,3) + RSI(14) + Lookback Sweep/Pattern Engine (replaces old RSI/EMA vote)
+  const indSeries = computeIndicatorSeries(cs);
+  const rsi = indSeries.rsi[lastIdx];
+  const stochK = indSeries.stochK[lastIdx];
+  const stochD = indSeries.stochD[lastIdx];
 
-  // RSI calculation
-  let gains = 0, losses = 0;
-  for (let i = lastIdx - 14; i <= lastIdx; i++) {
-    const diff = cs[i].close - cs[i - 1].close;
-    if (diff > 0) gains += diff;
-    else losses -= diff;
-  }
-  const avgGain = gains / 14;
-  const avgLoss = Math.max(0.00001, losses / 14);
-  const rs = avgGain / avgLoss;
-  const rsi = 100 - (100 / (1 + rs));
+  const srs = detectStochRsiSweepSignal(cs, lastIdx, undefined, indSeries);
+  const stochRsiSweep = srs
+    ? {
+        side: srs.side,
+        reasons: srs.reasons,
+        stochK: srs.stochK,
+        stochD: srs.stochD,
+        rsi: srs.rsi,
+        confirmations: srs.confirmations.map((c) => c.label),
+      }
+    : null;
 
-  if (rsi < 32) {
-    indStrategies.push(`RSI Oversold (${rsi.toFixed(1)})`);
-    indSide = 'BUY';
-  } else if (rsi > 68) {
-    indStrategies.push(`RSI Overbought (${rsi.toFixed(1)})`);
-    indSide = 'SELL';
-  }
+  const indicators = srs
+    ? {
+        side: srs.side,
+        strategies: [srs.stochTrigger, srs.rsiTrigger],
+        count: 2,
+        info: {
+          rsi: srs.rsi,
+          stochK: srs.stochK,
+          stochD: srs.stochD,
+        },
+      }
+    : null;
 
-  // EMA trend check
+  // EMA fast/slow retained purely for market trend label
   let emaFast = 0, emaSlow = 0;
   for (let i = lastIdx - 12; i <= lastIdx; i++) emaFast += cs[i].close;
   for (let i = lastIdx - 26; i <= lastIdx; i++) emaSlow += cs[i].close;
   emaFast /= 13;
   emaSlow /= 27;
-
-  if (emaFast > emaSlow && cur.close > emaFast) {
-    if (!indSide || indSide === 'BUY') {
-      indSide = 'BUY';
-      indStrategies.push('EMA 13/27 Bullish Crossover');
-    }
-  } else if (emaFast < emaSlow && cur.close < emaFast) {
-    if (!indSide || indSide === 'SELL') {
-      indSide = 'SELL';
-      indStrategies.push('EMA 13/27 Bearish Crossover');
-    }
-  }
-
-  const indicators = indStrategies.length > 0 && indSide ? {
-    side: indSide,
-    strategies: indStrategies,
-    count: indStrategies.length,
-    info: { rsi: Number(rsi.toFixed(1)), emaFast: Number(emaFast.toFixed(2)), emaSlow: Number(emaSlow.toFixed(2)) }
-  } : null;
 
   // 3. Candlestick Pattern Engine
   let patSide: 'BUY' | 'SELL' | null = null;
@@ -228,7 +220,7 @@ function evaluateEnginesCore(candles: CandleData[], tf: number = getGlobalTiming
   if (momentum) agreeSides.push(momentum.side);
   if (lscc) agreeSides.push(lscc.side);
   if (structureSweep) agreeSides.push(structureSweep.side);
-  if (indicators) agreeSides.push(indicators.side);
+  if (stochRsiSweep) agreeSides.push(stochRsiSweep.side);
   if (pattern) agreeSides.push(pattern.side);
 
   if (agreeSides.length === 0) {
@@ -247,6 +239,10 @@ function evaluateEnginesCore(candles: CandleData[], tf: number = getGlobalTiming
       momentum: null,
       lscc: null,
       structureSweep: null,
+      stochRsiSweep: null,
+      rsi: Number(rsi.toFixed(1)),
+      stochK: Number(stochK.toFixed(1)),
+      stochD: Number(stochD.toFixed(1)),
       reasons: ['Scanning live price action']
     };
   }
@@ -271,25 +267,33 @@ function evaluateEnginesCore(candles: CandleData[], tf: number = getGlobalTiming
       momentum,
       lscc,
       structureSweep,
-      reasons: [`Engines disagree on direction: ${[['sweep', sweep], ['continuation', continuation], ['momentum', momentum], ['LSCC', lscc], ['structureSweep', structureSweep], ['indicators', indicators], ['pattern', pattern]].filter(([, v]: any) => v).map(([n, v]: any) => `${n} ${v.side}`).join(' vs ')}`]
+      stochRsiSweep,
+      rsi: Number(rsi.toFixed(1)),
+      stochK: Number(stochK.toFixed(1)),
+      stochD: Number(stochD.toFixed(1)),
+      reasons: [`Engines disagree on direction: ${[['sweep', sweep], ['continuation', continuation], ['momentum', momentum], ['LSCC', lscc], ['structureSweep', structureSweep], ['stochRsiSweep', stochRsiSweep], ['pattern', pattern]].filter(([, v]: any) => v).map(([n, v]: any) => `${n} ${v.side}`).join(' vs ')}`]
     };
   }
 
   const side = buyVotes > 0 ? 'BUY' : 'SELL';
   const agreeCount = agreeSides.length;
   // NOT a probability of winning: only a count of agreeing engines. The measured win rate is src/liveConfidence.ts.
-  let confidence = 60;
-  if (agreeCount === 3) confidence = 85;
+  let confidence = 65;
+  if (agreeCount >= 3) confidence = 85;
   else if (agreeCount === 2) confidence = 75;
-  else confidence = 65;
+  else if (lscc || structureSweep) confidence = 75;
+  if (srs && stochRsiSweep) {
+    confidence = Math.max(confidence, srs.confidenceScore);
+  }
 
   const reasons: string[] = [];
+  if (stochRsiSweep) reasons.push(`Stoch+RSI+Confirm (${side}): ${stochRsiSweep.reasons.join(' | ')}`);
   if (sweep) reasons.push(`Wick Sweep (${side}): ${sweep.reasons.join(', ')}`);
   if (continuation) reasons.push(`Sweep Continuation (${side}): ${continuation.reasons.join(', ')}`);
   if (momentum) reasons.push(`Momentum (${side}): ${momentum.reasons.join(', ')}`);
   if (lscc) reasons.push(`LSCC (${side}): liquidity sweep confirmed by the next candle`);
   if (structureSweep) reasons.push(`Structure Sweep (${side}): ${structureSweep.reasons.join(', ')}`);
-  if (indicators) reasons.push(`Indicators (${side}): ${indicators.strategies.join(', ')}`);
+  if (indicators && !stochRsiSweep) reasons.push(`Indicators (${side}): ${indicators.strategies.join(', ')}`);
   if (pattern) reasons.push(`Pattern (${side}): ${pattern.patterns.join(', ')}`);
 
   const trend = emaFast > emaSlow ? 'Bullish' : emaFast < emaSlow ? 'Bearish' : 'Consolidating';
@@ -309,8 +313,11 @@ function evaluateEnginesCore(candles: CandleData[], tf: number = getGlobalTiming
     momentum,
     lscc,
     structureSweep,
+    stochRsiSweep,
     reasons,
     rsi: Number(rsi.toFixed(1)),
+    stochK: Number(stochK.toFixed(1)),
+    stochD: Number(stochD.toFixed(1)),
     trend
   };
 }

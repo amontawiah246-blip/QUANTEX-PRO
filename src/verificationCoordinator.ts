@@ -64,7 +64,9 @@ export function aggregate(ev: CandidateEvidence, engines: Map<EngineName, Engine
       ? [...ENGINE_NAMES, 'lscc']
       : ev.engine === 'structure_sweep'
         ? [...ENGINE_NAMES, 'structure_sweep']
-        : ENGINE_NAMES;
+        : ev.engine === 'stoch_rsi_sweep'
+          ? [...ENGINE_NAMES, 'stoch_rsi_sweep']
+          : ENGINE_NAMES;
   const corroboratedBy: EngineName[] = evalNames.filter((n) => engines.get(n)?.status === 'CONFIRMS');
   const primary = engines.get(ev.engine);
   if (!primary) reasons.push(`the ${ev.engine} engine gave no answer`);
@@ -166,8 +168,8 @@ export class VerificationCoordinator {
     c.decided = true;
     const rec = this.hub.get(ev.candidateId)!;
     const v1 = rec.versions[0];
-    // LSCC & Structure Sweep: each setup's own rules are re-run on the frozen evidence like an engine's (the three strategy engines above still read the same screenshot and candles)
-    if (v1.engine === 'lscc' || v1.engine === 'structure_sweep') {
+    // LSCC, Structure Sweep & Stoch+RSI: each setup's own rules are re-run on the frozen evidence like an engine's
+    if (v1.engine === 'lscc' || v1.engine === 'structure_sweep' || v1.engine === 'stoch_rsi_sweep') {
       const lr = evaluateEngine(v1.engine, v1, Date.now, this.perf);
       this.hub.metrics.record(`engine:${v1.engine}`, lr.durationMs);
       const ok = this.hub.recordResult(lr);

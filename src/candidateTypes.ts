@@ -3,7 +3,7 @@
 import { candleSetHash, sha256 } from './aiVerification';
 import { validOhlc } from './candleMath';
 import type { Bar } from './patternVerification';
-import type { EngineName } from './sweepEngines';
+import type { EngineName, VerdictStochMeta } from './sweepEngines';
 
 export type Side = 'BUY' | 'SELL';
 
@@ -74,6 +74,8 @@ export interface CandidateEvidence {
     pullbackTime: number;
     sweepTime: number;
   };
+  /** Stochastic + RSI + Lookback confirmation metadata */
+  stochRsi?: VerdictStochMeta;
 }
 
 export interface PublishInput {
@@ -83,6 +85,7 @@ export interface PublishInput {
   detectedAtMs: number; detectionLatencySec: number | null;
   lscc?: CandidateEvidence['lscc'];
   structureSweep?: CandidateEvidence['structureSweep'];
+  stochRsi?: VerdictStochMeta;
 }
 
 export interface UpdateInput { ohlc: Bar[]; screenshot: CandidateScreenshot; reason: string; detectedAtMs?: number }
@@ -92,6 +95,7 @@ export const candidateIdFor = (symbol: string, tf: number, signalCandleOpen: num
   `cand-${sha256(`${symbol}|${tf}|${signalCandleOpen}|${direction}`).slice(0, 16)}`;
 
 export function patternNameOf(engine: EngineName, direction: Side): string {
+  if (engine === 'stoch_rsi_sweep') return direction === 'BUY' ? 'Stoch <20 + RSI 30/50 + Lookback Confirmation BUY' : 'Stoch >80 + RSI 70/50 + Lookback Confirmation SELL';
   if (engine === 'structure_sweep') return direction === 'BUY' ? 'Structure-Confirmed Sweep BUY - Bullish Bias + Liquidity Sweep' : 'Structure-Confirmed Sweep SELL - Bearish Bias + Liquidity Sweep';
   if (engine === 'lscc') return direction === 'BUY' ? 'LSCC BUY - Bullish liquidity sweep confirmed' : 'LSCC SELL - Bearish liquidity sweep confirmed';
   const buy = direction === 'BUY', s = buy ? 'Buy' : 'Sell', col = buy ? 'Green' : 'Red';

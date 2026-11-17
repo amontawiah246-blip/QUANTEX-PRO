@@ -10,10 +10,20 @@ import { ContinuationParams, CONTINUATION_DEFAULTS, detectContinuationSignal } f
 import { LsccParams, LSCC_DEFAULTS, LsccSignal, detectLsccSignal } from './lscc';
 import { MomentumParams, MOMENTUM_DEFAULTS, detectMomentumSignal } from './momentumEngine';
 import { StructureSweepParams, detectStructureSweepSignal } from './structureSweep';
+import { detectStochRsiSweepSignal } from './stochRsiSweep';
 
 export interface C { time: number; open: number; high: number; low: number; close: number; closed?: boolean }
 export type Side = 'BUY' | 'SELL';
-export type EngineName = 'sweep' | 'continuation' | 'momentum' | 'lscc' | 'structure_sweep';
+export type EngineName = 'sweep' | 'continuation' | 'momentum' | 'lscc' | 'structure_sweep' | 'stoch_rsi_sweep';
+
+export interface VerdictStochMeta {
+  stochK: number;
+  stochD: number;
+  rsi: number;
+  stochTrigger: string;
+  rsiTrigger: string;
+  confirmations: string[];
+}
 
 export interface VerdictStructureMeta {
   biasDirection: 'BULLISH' | 'BEARISH';
@@ -40,6 +50,7 @@ export interface Verdict {
   trace?: string[];            // continuation + momentum: the exact arithmetic of every check that qualified the setup
   lscc?: LsccInfo;             // LSCC only: the swept level and the sweep / confirmation / entry candles
   structureMeta?: VerdictStructureMeta;
+  stochMeta?: VerdictStochMeta;
 }
 
 export interface LsccInfo { level: number; levelTime: number; sweepTime: number; confirmTime: number; entryTime: number }
@@ -226,6 +237,34 @@ export function detectStructureSweep(cs: C[], i: number, p?: Partial<StructSweep
   };
 }
 
+// ------------------------------------------------------------------------------------------------ 6. Stochastic + RSI + Lookback Sweep / Pattern
+export function detectStochRsiSweep(cs: C[], i: number): Verdict | null {
+  const sig = detectStochRsiSweepSignal(cs, i);
+  if (!sig) return null;
+  const earliestConfirm = sig.confirmations.reduce((m, c) => Math.min(m, c.index), i);
+  return {
+    engine: 'stoch_rsi_sweep',
+    side: sig.side,
+    ok: true,
+    block: null,
+    notes: [...sig.reasons, 'trade on the next candle open'],
+    trace: [...sig.trace],
+    entry: sig.entryReference,
+    sweptLevel: sig.sweptLevel,
+    from: Math.max(0, Math.min(i - 2, earliestConfirm)),
+    signalIndex: i,
+    tradeAtNextOpen: true,
+    stochMeta: {
+      stochK: sig.stochK,
+      stochD: sig.stochD,
+      rsi: sig.rsi,
+      stochTrigger: sig.stochTrigger,
+      rsiTrigger: sig.rsiTrigger,
+      confirmations: sig.confirmations.map((c) => c.label),
+    },
+  };
+}
+
 /** Everything that fires on closed candle i. */
 export function detectAll(cs: C[], i: number): Verdict[] {
   const out: Verdict[] = [];
@@ -234,5 +273,6 @@ export function detectAll(cs: C[], i: number): Verdict[] {
   const m = detectMomentum(cs, i); if (m) out.push(m);
   const l = detectLscc(cs, i); if (l) out.push(l);
   const ss = detectStructureSweep(cs, i); if (ss) out.push(ss);
+  const srs = detectStochRsiSweep(cs, i); if (srs) out.push(srs);
   return out;
 }

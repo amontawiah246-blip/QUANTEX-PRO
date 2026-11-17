@@ -7,7 +7,7 @@ import { useGlobalTiming } from "./useGlobalTiming";
 
 export interface SweepAlert {
   id: number; symbol: string; name: string; market: string; tf: number; candle_time: number;
-  engine: "sweep" | "continuation" | "momentum" | "lscc" | "structure_sweep"; trade_at_next_open: boolean;
+  engine: "sweep" | "continuation" | "momentum" | "lscc" | "structure_sweep" | "stoch_rsi_sweep"; trade_at_next_open: boolean;
   side: "BUY" | "SELL"; ok: boolean; block: string | null; notes: string[]; entry: number; swept_level: number;
   created: number; live: boolean;
   /** LSCC: where the liquidity-sweep setup stands and the candles it is made of */
@@ -48,6 +48,7 @@ export const ENGINE_LABEL: Record<SweepAlert["engine"], string> = {
   momentum: "Momentum",
   lscc: "LSCC",
   structure_sweep: "Structure Sweep",
+  stoch_rsi_sweep: "Stoch+RSI+Sweep",
 };
 /** the label the LSCC setup carries on screen: WAITING, BUY, SELL, INVALID (expiry is shown on the LSCC board, which knows the clock) */
 export const lsccTag = (a: SweepAlert) => a.engine !== "lscc" || !a.lscc ? "" : a.lscc.state === "WAITING" ? "LSCC WAITING" : a.lscc.state === "INVALID" ? "LSCC INVALID" : `LSCC ${a.side}`;
@@ -170,7 +171,7 @@ export default function SweepAlerts({ feed, http }: { feed: SweepFeed; http: str
     <section className="sw">
       <div className="sw-card">
         <div className="sw-head">
-          <b>Setup watch: sweep, continuation, momentum, LSCC, Structure</b>
+          <b>Setup watch: sweep, continuation, momentum, LSCC, Structure, Stoch+RSI</b>
           <span className={`sw-dot ${state?.running ? "on" : ""}`}>
             {timing.transitioning ? `Syncing ${timing.syncedAgents.length}/${timing.requiredAgents.length}` : state?.running ? "Watching" : "Stopped"}
           </span>
@@ -201,7 +202,7 @@ export default function SweepAlerts({ feed, http }: { feed: SweepFeed; http: str
         ))}
       </div>
       <div className="sw-row sw-filter">
-        {([["all", "All engines"], ["sweep", "Sweep"], ["continuation", "Continuation"], ["momentum", "Momentum"], ["lscc", "LSCC"], ["structure_sweep", "Structure Sweep"]] as const).map(([k, l]) => (
+        {([["all", "All engines"], ["stoch_rsi_sweep", "Stoch+RSI"], ["sweep", "Sweep"], ["continuation", "Continuation"], ["momentum", "Momentum"], ["lscc", "LSCC"], ["structure_sweep", "Structure Sweep"]] as const).map(([k, l]) => (
           <button key={k} className={`sw-chip ${engine === k ? "on" : ""}`} onClick={() => setEngine(k)}>{l}</button>
         ))}
       </div>

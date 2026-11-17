@@ -3,6 +3,7 @@ import { BROKERS } from "./assets";
 
 export interface StatusData {
   ready?: boolean;
+  tradable?: boolean;
   error?: string;
   balance?: number | null;
   demo?: boolean;
@@ -25,8 +26,10 @@ export function Home({ status, brokerName, onOpenChart, onSwitchAccount, onShowH
       <div className="card">
         <div className="row">
           <span>{brokerName}</span>
-          <b className={status?.ready ? "up" : "down"}>
-            {status?.ready ? "Connected" : status ? "Starting / Connecting..." : "Offline"}
+          <b className={status?.ready && status?.tradable !== false ? "up" : "down"}>
+            {status?.ready
+              ? (status?.tradable === false ? "Feed Only (Reconnecting Auth…)" : "Connected")
+              : status ? "Starting / Connecting..." : "Offline"}
           </b>
         </div>
         <div className="row"><span>Account</span>
@@ -137,6 +140,9 @@ export function Api({ bridge, setBridge, broker, status }: ApiProps) {
             disabled={saving || !ssidInput.trim()} onClick={saveLogin}>
             {saving ? 'Connecting...' : 'Save & Connect Deriv'}
           </button>
+          <p className="muted" style={{ marginTop: '6px' }}>
+            Trading Session: <b style={{ color: status?.tradable ? '#34d399' : '#fbbf24' }}>{status?.tradable ? 'Authenticated & Ready' : 'Not Authenticated'}</b>
+          </p>
           {status?.error && <p className="warn" style={{ marginTop: '6px' }}>{status.error}</p>}
           {msg && <p className="muted" style={{ marginTop: '6px' }}>{msg}</p>}
         </div>

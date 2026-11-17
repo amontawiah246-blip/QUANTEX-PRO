@@ -116,7 +116,7 @@ export class Autopilot {
     const queue: AgentSetup[] = [];
     const activeSymbols = new Set<string>();
     const activeTrades = new Map<string, Promise<void>>();
-    const MAX_CONCURRENT = 3;
+    const MAX_CONCURRENT = 10;
     let wake: (() => void) | null = null;
     const offs = [src.subscribe((s) => { queue.push(s); wake?.(); }), src.onChange(() => this.pushAgent())];
     this.pushAgent();

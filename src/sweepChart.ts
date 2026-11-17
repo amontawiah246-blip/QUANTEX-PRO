@@ -1,7 +1,8 @@
 // Renders a setup as an SVG chart in the style of the marked "Valid Buy / Sell Setup" screenshots.
 // The chart ends at the candle that just closed: exactly what the engine saw (no future candles).
-import type { EngineName, VerdictStructureMeta } from './sweepEngines';
+import type { EngineName, VerdictStochMeta, VerdictStructureMeta } from './sweepEngines';
 import { analyzeStructureSweep } from './structureSweep';
+import { computeIndicatorSeries } from './stochRsiSweep';
 
 export interface AlertChartOptions {
   engine: EngineName;
@@ -19,20 +20,99 @@ export interface AlertChartOptions {
   lsccState?: 'WAITING' | 'INVALID' | 'CONFIRMED';
   /** Structure Sweep metadata: swing points, CHoCH/MSS/BOS break level, active bias */
   structureMeta?: VerdictStructureMeta;
+  /** Stoch+RSI+Sweep metadata */
+  stochMeta?: VerdictStochMeta;
 }
 
-const W = 1168, H = 784;
+const W = 1168, H = 840;
 const GREEN = '#3cb54f', RED = '#e8202e', AMBER = '#f5b942', CYAN = '#38bdf8';
+const STO_K_BLUE = '#3b82f6', STO_D_ORANGE = '#f97316', RSI_LIME = '#a3e635';
+const LVL_GREEN = '#22c55e', LVL_YELLOW = '#eab308', LVL_MID = '#64748b';
 const BG = '#030a1a', GRID = '#1b2742', TXT = '#ffffff', DIM = '#8a96b4';
 const FONT = "Inter, 'Segoe UI', Arial, Helvetica, sans-serif";
-const L = 118, R = 1128, T = 168, B = 686;
+const L = 118, R = 1128, T = 152, B = 500;
+const STO_T = 532, STO_B = 640;
+const RSI_T = 668, RSI_B = 780;
 const TRAIL = 3;                       // empty slots to the right: room for the "next candle" arrow
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const pad2 = (v: number) => String(v).padStart(2, '0');
 
+function emaSeries(vals: number[], period: number): number[] {
+  if (!vals.length) return [];
+  const k = 2 / (period + 1);
+  const out = [vals[0]];
+  for (let i = 1; i < vals.length; i++) out.push(vals[i] * k + out[i - 1] * (1 - k));
+  return out;
+}
+
+/** Shared helper that draws EMA 9/21 overlay + Stochastic Oscillator 14 3 3 + RSI 14 sub-panels matching the reference chart. */
+export function appendOscillatorSubPanels(
+  s: string[],
+  allCandles: Array<{ time: number; open: number; high: number; low: number; close: number }>,
+  shownCount: number,
+  x: (i: number) => number,
+  yPrice?: (p: number) => number,
+) {
+  if (allCandles.length < 2) return;
+  const offset = Math.max(0, allCandles.length - shownCount);
+  const n = Math.min(shownCount, allCandles.length);
+  const closes = allCandles.map((c) => c.close);
+
+  // EMA 9 (amber) + EMA 21 (cyan) overlay on main price chart
+  if (yPrice) {
+    const e9 = emaSeries(closes, 9).slice(offset);
+    const e21 = emaSeries(closes, 21).slice(offset);
+    const pts9 = e9.map((v, idx) => `${x(idx).toFixed(1)},${yPrice(v).toFixed(1)}`).join(' ');
+    const pts21 = e21.map((v, idx) => `${x(idx).toFixed(1)},${yPrice(v).toFixed(1)}`).join(' ');
+    s.push(`<polyline fill="none" stroke="${AMBER}" stroke-width="1.8" opacity="0.85" points="${pts9}"/>`);
+    s.push(`<polyline fill="none" stroke="${CYAN}" stroke-width="1.8" opacity="0.85" points="${pts21}"/>`);
+  }
+
+  // Compute causal Slow Stochastic(14,3,3) and Wilder RSI(14) over full available slice
+  const series = computeIndicatorSeries(allCandles);
+  const rsiSlice = series.rsi.slice(offset);
+  const kSlice = series.stochK.slice(offset);
+  const dSlice = series.stochD.slice(offset);
+
+  const curRsi = rsiSlice[n - 1] ?? 50;
+  const curK = kSlice[n - 1] ?? 50;
+  const curD = dSlice[n - 1] ?? 50;
+
+  // --- Panel 2: Stochastic Oscillator 14 3 3 (blue %K, solid orange %D, 80 green / 20 yellow)
+  s.push(`<rect x="${L}" y="${STO_T}" width="${R - L}" height="${STO_B - STO_T}" fill="#050e24" stroke="${GRID}" stroke-width="1"/>`);
+  const ySto = (v: number) => STO_B - (Math.max(0, Math.min(100, v)) / 100) * (STO_B - STO_T);
+  for (const [lv, col] of [[80, LVL_GREEN], [20, LVL_YELLOW]] as const) {
+    const yy = ySto(lv);
+    s.push(`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${R}" y2="${yy.toFixed(1)}" stroke="${col}" stroke-width="1.3" opacity="0.72"/>`);
+    s.push(`<text x="${R + 10}" y="${(yy + 4).toFixed(1)}" fill="${DIM}" font-size="13" text-anchor="start">${lv}</text>`);
+    s.push(`<text x="${L - 8}" y="${(yy + 4).toFixed(1)}" fill="${DIM}" font-size="13" text-anchor="end">${lv}</text>`);
+  }
+  const kPts = kSlice.map((v, idx) => `${x(idx).toFixed(1)},${ySto(v).toFixed(1)}`).join(' ');
+  const dPts = dSlice.map((v, idx) => `${x(idx).toFixed(1)},${ySto(v).toFixed(1)}`).join(' ');
+  s.push(`<polyline fill="none" stroke="${STO_D_ORANGE}" stroke-width="2.2" points="${dPts}"/>`);
+  s.push(`<polyline fill="none" stroke="${STO_K_BLUE}" stroke-width="2.4" points="${kPts}"/>`);
+  s.push(`<circle cx="${x(n - 1).toFixed(1)}" cy="${ySto(curK).toFixed(1)}" r="4.5" fill="${STO_K_BLUE}"/>`);
+  s.push(`<text x="${L + 10}" y="${STO_T + 18}" fill="#e2e8f0" font-size="15" font-weight="700">Stochastic Oscillator 14 3 3 <tspan fill="${STO_K_BLUE}">%K ${curK.toFixed(1)}</tspan> / <tspan fill="${STO_D_ORANGE}">%D ${curD.toFixed(1)}</tspan></text>`);
+
+  // --- Panel 3: RSI 14 (lime line, 70 green / 50 mid / 30 yellow)
+  s.push(`<rect x="${L}" y="${RSI_T}" width="${R - L}" height="${RSI_B - RSI_T}" fill="#050e24" stroke="${GRID}" stroke-width="1"/>`);
+  const yRsi = (v: number) => RSI_B - (Math.max(0, Math.min(100, v)) / 100) * (RSI_B - RSI_T);
+  for (const [lv, col] of [[70, LVL_GREEN], [50, LVL_MID], [30, LVL_YELLOW]] as const) {
+    const yy = yRsi(lv);
+    s.push(`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${R}" y2="${yy.toFixed(1)}" stroke="${col}" stroke-width="1.2" opacity="0.65"/>`);
+    s.push(`<text x="${R + 10}" y="${(yy + 4).toFixed(1)}" fill="${DIM}" font-size="13" text-anchor="start">${lv}</text>`);
+    s.push(`<text x="${L - 8}" y="${(yy + 4).toFixed(1)}" fill="${DIM}" font-size="13" text-anchor="end">${lv}</text>`);
+  }
+  const rsiPts = rsiSlice.map((v, idx) => `${x(idx).toFixed(1)},${yRsi(v).toFixed(1)}`).join(' ');
+  s.push(`<polyline fill="none" stroke="${RSI_LIME}" stroke-width="2.4" points="${rsiPts}"/>`);
+  s.push(`<circle cx="${x(n - 1).toFixed(1)}" cy="${yRsi(curRsi).toFixed(1)}" r="4.5" fill="${RSI_LIME}"/>`);
+  s.push(`<text x="${L + 10}" y="${RSI_T + 18}" fill="#e2e8f0" font-size="15" font-weight="700">RSI 14 <tspan fill="${RSI_LIME}">${curRsi.toFixed(1)}</tspan></text>`);
+}
+
 export function alertTitle(o: Pick<AlertChartOptions, 'engine' | 'side' | 'ok' | 'lsccState'>): string {
   const buy = o.side === 'BUY';
+  if (o.engine === 'stoch_rsi_sweep') return `Stoch+RSI+Confirm ${buy ? 'BUY' : 'SELL'} \u2013 Indicator Cross + Lookback Confirmation`;
   if (o.engine === 'structure_sweep') return `Structure-Confirmed Sweep ${buy ? 'BUY' : 'SELL'} \u2013 ${buy ? 'Bullish' : 'Bearish'} Bias + Liquidity Sweep`;
   if (o.engine === 'lscc') return o.lsccState === 'WAITING' ? 'LSCC WAITING \u2013 Sweep detected, confirmation pending' : o.lsccState === 'INVALID' ? 'LSCC INVALID \u2013 Confirmation failed' : `LSCC ${buy ? 'BUY' : 'SELL'} \u2013 ${buy ? 'Bullish' : 'Bearish'} liquidity sweep confirmed`;
   const s = buy ? 'Buy' : 'Sell';
@@ -44,6 +124,9 @@ export function alertTitle(o: Pick<AlertChartOptions, 'engine' | 'side' | 'ok' |
 
 export function alertRule(o: Pick<AlertChartOptions, 'engine' | 'side'>): string {
   const buy = o.side === 'BUY';
+  if (o.engine === 'stoch_rsi_sweep') return buy
+    ? 'Stoch(14,3,3) %K crossed up from <20 & RSI(14) crossed up <30/50 + lookback Wick Sweep/Pattern. BUY at next open'
+    : 'Stoch(14,3,3) %K crossed down from >80 & RSI(14) crossed down >70/50 + lookback Wick Sweep/Pattern. SELL at next open';
   if (o.engine === 'structure_sweep') return buy
     ? 'Bullish CHoCH/MSS/BOS bias active; red pullback low swept by green candle and closed back above. BUY at the next candle open'
     : 'Bearish CHoCH/MSS/BOS bias active; green pullback high swept by red candle and closed back below. SELL at the next candle open';
@@ -58,7 +141,8 @@ export function renderAlertSvg(
   o: AlertChartOptions,
 ): string {
   const isStructSweep = o.engine === 'structure_sweep';
-  const cs = candles.slice(isStructSweep ? -36 : -16);
+  const isStochRsi = o.engine === 'stoch_rsi_sweep';
+  const cs = candles.slice(isStructSweep ? -36 : isStochRsi ? -24 : -16);
   const n = cs.length;
   if (n === 0) return '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>';
 
@@ -117,27 +201,27 @@ export function renderAlertSvg(
     `<rect width="${W}" height="${H}" fill="${BG}"/>`,
   ];
 
-  for (let k = 0; k < 9; k++) {
-    const p = ymin + ((ymax - ymin) * k) / 8, yy = y(p);
+  for (let k = 0; k < 7; k++) {
+    const p = ymin + ((ymax - ymin) * k) / 6, yy = y(p);
     s.push(`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${R}" y2="${yy.toFixed(1)}" stroke="${GRID}" stroke-width="1.5" stroke-dasharray="7 7"/>`);
-    s.push(`<text x="${L - 12}" y="${(yy + 6).toFixed(1)}" fill="${DIM}" font-size="19" text-anchor="end">${p.toFixed(dec)}</text>`);
+    s.push(`<text x="${L - 12}" y="${(yy + 6).toFixed(1)}" fill="${DIM}" font-size="17" text-anchor="end">${p.toFixed(dec)}</text>`);
   }
   const step = Math.max(1, Math.round(n / 8));
   for (let i = 0; i < n; i += step) {
     const xx = x(i);
     s.push(`<line x1="${xx.toFixed(1)}" y1="${T}" x2="${xx.toFixed(1)}" y2="${B}" stroke="${GRID}" stroke-width="1.5" stroke-dasharray="7 7"/>`);
-    s.push(`<text x="${xx.toFixed(1)}" y="${B + 34}" fill="${DIM}" font-size="19" text-anchor="middle">${hhmm(cs[i].time)}</text>`);
+    s.push(`<text x="${xx.toFixed(1)}" y="${B + 22}" fill="${DIM}" font-size="15" text-anchor="middle">${hhmm(cs[i].time)}</text>`);
   }
 
   // index of the swept candle (the one whose extreme was taken) and of the sweeper
   const patternLen = Math.min(Math.max(o.patternLen, 2), n);
   const first = n - patternLen;                                   // first candle of the pattern
   const lsccWaiting = o.engine === 'lscc' && o.lsccState === 'WAITING';
-  const sweptIdx = o.engine === 'momentum' ? -1
+  const sweptIdx = (o.engine === 'momentum' || isStochRsi) ? -1
     : o.engine === 'lscc' ? (lsccWaiting ? n - 1 : n - 2)
     : (o.engine === 'sweep' || isStructSweep) ? n - 2
     : n - 4;
-  const sweeperIdx = o.engine === 'momentum' ? -1 : sweptIdx + 1;
+  const sweeperIdx = sweptIdx >= 0 ? sweptIdx + 1 : -1;
 
   const frame = (i: number, stroke: string, op = 0.8) => {
     const c = cs[i];
@@ -158,6 +242,14 @@ export function renderAlertSvg(
     s.push(`<text x="${(R - 119).toFixed(1)}" y="${(T + 28).toFixed(1)}" fill="${CYAN}" font-size="15" font-weight="700" text-anchor="middle">${esc(sMeta.biasDirection)} BIAS (${esc(sMeta.eventType)})</text>`);
   }
 
+  if (isStochRsi && Number.isFinite(o.swept_level) && o.swept_level > 0) {
+    const yl = y(o.swept_level);
+    const x0 = x(Math.max(0, n - 6)) - slot * 0.4, x1 = x(n - 1) + slot * 0.9;
+    s.push(`<line x1="${x0.toFixed(1)}" y1="${yl.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${yl.toFixed(1)}" stroke="${AMBER}" stroke-width="2.2" stroke-dasharray="4 5"/>`);
+    s.push(`<text x="${(x1 + 8).toFixed(1)}" y="${(yl + 5).toFixed(1)}" fill="${AMBER}" font-size="15" font-weight="700">confirm ${o.swept_level.toFixed(dec)}</text>`);
+    frame(n - 1, colour, 0.9);
+  }
+
   if (sweptIdx >= 0 && (sweptIdx < n - 1 || lsccWaiting)) {
     const yl = y(o.swept_level);
     const x0 = x(sweptIdx) - slot * 0.5, x1 = x(n - 1) + slot * 0.9;
@@ -170,6 +262,9 @@ export function renderAlertSvg(
     const top = y(Math.max(...cs.slice(first).map((c) => c.high))) - 10, bot = Math.max(...cs.slice(first).map((c) => y(c.low))) + 10;
     s.push(`<rect x="${(x(first) - slot * 0.46).toFixed(1)}" y="${top.toFixed(1)}" width="${(x(n - 1) - x(first) + slot * 0.92).toFixed(1)}" height="${(bot - top).toFixed(1)}" rx="8" fill="none" stroke="${colour}" stroke-width="2" stroke-dasharray="6 6" opacity=".85"/>`);
   }
+
+  // Draw EMA 9/21 overlay + RSI(14) + Stoch(14,3,3) indicator panes
+  appendOscillatorSubPanels(s, candles, n, x, y);
 
   for (let i = 0; i < n; i++) {
     const c = cs[i], col = c.close >= c.open ? GREEN : RED, xx = x(i);
@@ -212,13 +307,13 @@ export function renderAlertSvg(
   if (sweepArrowOnCandle) {
     const ax = x(n - 1);
     if (buy) {
-      const tip = y(sig.low) + 26;
-      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-20 28 h13 v34 h14 v-34 h13 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 100).toFixed(1)}" fill="${colour}" font-size="30" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
+      const tip = y(sig.low) + 22;
+      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 24 h12 v28 h12 v-28 h12 z" fill="${colour}"/>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 82).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
     } else {
-      const tip = y(sig.high) - 26;
-      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-20 -28 h13 v-34 h14 v34 h13 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 72).toFixed(1)}" fill="${colour}" font-size="30" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
+      const tip = y(sig.high) - 22;
+      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 -24 h12 v-28 h12 v28 h12 z" fill="${colour}"/>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 62).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
     }
   } else if (o.engine === 'lscc' && o.lsccState && o.lsccState !== 'CONFIRMED') {
     // waiting or invalid: no entry arrow. Nothing is traded on a sweep alone.
@@ -227,27 +322,28 @@ export function renderAlertSvg(
     const ax = x(n), cy = y(sig.close);
     s.push(`<line x1="${x(n - 1).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${ax.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${colour}" stroke-width="2" stroke-dasharray="3 6" opacity=".6"/>`);
     if (buy) {
-      const tip = cy - 40;                      // arrow points UP, label above
-      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-20 28 h13 v34 h14 v-34 h13 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 34).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 10).toFixed(1)}" fill="${DIM}" font-size="17" text-anchor="middle">next open</text>`);
+      const tip = cy - 36;                      // arrow points UP, label above
+      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 24 h12 v28 h12 v-28 h12 z" fill="${colour}"/>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 30).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 8).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
     } else {
-      const tip = cy + 40;                      // arrow points DOWN, label below
-      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-20 -28 h13 v-34 h14 v34 h13 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 34).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 58).toFixed(1)}" fill="${DIM}" font-size="17" text-anchor="middle">next open</text>`);
+      const tip = cy + 36;                      // arrow points DOWN, label below
+      s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 -24 h12 v-28 h12 v28 h12 z" fill="${colour}"/>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 30).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 52).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
     }
   }
 
-  s.push(`<text x="${W / 2}" y="58" fill="${o.ok ? TXT : colour}" font-size="${isStructSweep ? 32 : 38}" font-weight="700" text-anchor="middle">${esc(alertTitle(o))}</text>`);
+  s.push(`<text x="${W / 2}" y="50" fill="${o.ok ? TXT : colour}" font-size="${isStructSweep || isStochRsi ? 30 : 34}" font-weight="700" text-anchor="middle">${esc(alertTitle(o))}</text>`);
   const when = new Date(sig.time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   const tfl = o.tf < 60 ? `${o.tf}s` : `${Math.floor(o.tf / 60)}m`;
-  s.push(`<text x="${W / 2}" y="98" fill="${DIM}" font-size="23" text-anchor="middle">${esc(o.market)} \u00b7 ${esc(o.symbol)} \u00b7 ${tfl} \u00b7 last closed candle ${when}</text>`);
+  s.push(`<text x="${W / 2}" y="88" fill="${DIM}" font-size="21" text-anchor="middle">${esc(o.market)} \u00b7 ${esc(o.symbol)} \u00b7 ${tfl} \u00b7 last closed candle ${when}</text>`);
   const notes = (o.notes ?? []).filter((t) => !/next candle open/.test(t));
   const why = o.ok ? (notes.join(', ') || 'confirmed') : (o.block || 'context check failed');
   const word = o.engine === 'lscc' && o.lsccState === 'WAITING' ? 'WAITING' : o.engine === 'lscc' && o.lsccState === 'INVALID' ? 'INVALID' : o.ok ? 'TAKE' : 'SKIP';
-  s.push(`<text x="${W / 2}" y="132" fill="${colour}" font-size="${why.length > 80 ? 18 : 22}" font-weight="600" text-anchor="middle">${word}: ${esc(why)}</text>`);
-  s.push(`<text x="${L}" y="${H - 22}" fill="${DIM}" font-size="17">${esc(alertRule(o))}</text>`);
+  s.push(`<text x="${W / 2}" y="122" fill="${colour}" font-size="${why.length > 80 ? 17 : 20}" font-weight="600" text-anchor="middle">${word}: ${esc(why)}</text>`);
+  s.push(`<text x="${L}" y="${H - 18}" fill="${DIM}" font-size="15">${esc(alertRule(o))}</text>`);
   s.push('</svg>');
   return s.join('\n');
 }
+

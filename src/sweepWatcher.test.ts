@@ -42,7 +42,7 @@ test("live watching gives exactly the engines' signals on the finished series (n
   for (let i = 60; i < 400; i++) { st.now = T0 + (i + 1) * TF + 3; await w.runPass(0); }
 
   // LSCC sweeps that are still waiting or failed their confirmation are shown too, but they are not engine signals (see lscc.test.ts)
-  const everything = w.getAlerts(0, 300);
+  const everything = w.getAlerts(0, 500);
   assert.ok(everything.filter((a) => a.engine === "lscc" && a.lscc?.state !== "CONFIRMED").every((a) => !a.ok), "a sweep without confirmation is never a TAKE");
   const all = everything.filter((a) => !(a.engine === "lscc" && a.lscc?.state !== "CONFIRMED"));
   const got = all.map((a) => `${a.symbol}|${a.engine}|${a.candle_time}|${a.side}|${a.ok}`).sort();

@@ -127,12 +127,12 @@ export default function App() {
       }
     };
     load();
-    const id = setInterval(load, status?.ready ? 30000 : 3000);
+    const id = setInterval(load, status?.ready && status?.tradable !== false ? 30000 : 3000);
     return () => {
       dead = true;
       clearInterval(id);
     };
-  }, [http, status?.ready, asset]);
+  }, [http, status?.ready, status?.tradable, asset]);
 
   useEffect(() => {
     if (!toast) return;

@@ -1,6 +1,6 @@
 // Watches every agent's market (the logic; sweepWatcher.ts plugs in the live Deriv data). When a candle CLOSES, the three engines (src/sweepEngines.ts) look at it; every real setup gets a
 // screenshot (src/sweepChart.ts) that the Menu and the agent cards show. Nothing else is ever posted: no filler "snapshot" charts.
-import { C, EngineName, Verdict, VerdictStructureMeta, detectAll, isFlat } from './sweepEngines';
+import { C, EngineName, Verdict, VerdictStochMeta, VerdictStructureMeta, detectAll, isFlat } from './sweepEngines';
 import { findLsccSweep, lsccOutcome } from './lscc';
 import { renderAlertSvg } from './sweepChart';
 import { renderPlainSvg } from './screenshot';
@@ -37,6 +37,8 @@ export interface SweepAlertData {
   lscc?: LsccAlertInfo;
   /** Structure-confirmed sweep metadata */
   structureMeta?: VerdictStructureMeta;
+  /** Stochastic + RSI + Lookback confirmation metadata */
+  stochMeta?: VerdictStochMeta;
   /** the alert that this one replaced (an LSCC alert is updated in place when its confirmation arrives or fails: same candidate, new id, new screenshot) */
   replaces?: number;
 }
@@ -54,10 +56,10 @@ export interface SweepAgent { symbol: string; name: string; market: string; tf?:
 
 
 
-const PATTERN_LEN: Record<EngineName, number> = { sweep: 2, momentum: 3, continuation: 4, lscc: 2, structure_sweep: 2 };
+const PATTERN_LEN: Record<EngineName, number> = { sweep: 2, momentum: 3, continuation: 4, lscc: 2, structure_sweep: 2, stoch_rsi_sweep: 4 };
 const FETCH = 250;           // candles read per market and check (the hybrid / indicator evidence needs more than the engines' 45)
 const WINDOW = ENGINE_WINDOW; // candles an engine gets to look at
-const KEEP = 300;            // alerts kept in memory
+const KEEP = 500;            // alerts kept in memory
 const DELAY_SEC = 2.5;       // wait after a candle boundary so the broker has published the closed candle
 const CONCURRENCY = 6;        // markets checked at once by a backfill pass
 const FETCH_SLOTS = 8;        // broker requests in flight at once, shared by all agents (controlled concurrency, never a barrier)
@@ -165,7 +167,7 @@ export class SweepWatcherService {
   public getAlerts(since = 0, limit = 60) {
     const list = this.alerts.filter((a) => a.id > since);
     list.sort((a, b) => b.candle_time - a.candle_time || b.id - a.id);
-    return list.slice(0, Math.max(1, Math.min(300, limit))).map(({ svg: _svg, ...rest }) => rest);
+    return list.slice(0, Math.max(1, Math.min(500, limit))).map(({ svg: _svg, ...rest }) => rest);
   }
 
   public getAlertSvg(id: number): string | null {
@@ -320,7 +322,7 @@ export class SweepWatcherService {
     for (const rec of this.hub.activeFor(a.symbol, nowSec)) {
       if (rec.tf !== tf || !this.hub.changed(rec.id, rows)) continue;
       const t0 = this.perf();
-      const svg = renderPlainSvg(rows.slice(-16), rec.direction, a.market, tf);       // the chart as it looks NOW (no pattern annotation: the pattern is the original's)
+      const svg = renderPlainSvg(rows.slice(-60), rec.direction, a.market, tf);       // the chart as it looks NOW (no pattern annotation: the pattern is the original's)
       const png = await this.raster(svg);
       const shot = screenshotOf(svg, png, this.wall(), this.perf() - t0);
       this.hub.update(rec.id, { ohlc: rows, screenshot: shot, reason, detectedAtMs: this.wall() });
@@ -350,6 +352,7 @@ export class SweepWatcherService {
         pullbackTime: v.structureMeta.pullbackTime,
         sweepTime: v.structureMeta.sweepTime,
       } : undefined,
+      stochRsi: v.stochMeta,
       ohlc: closed.slice(-FETCH), engineWindow: WINDOW, screenshot: shot,
       detectedAtMs: this.wall(), detectionLatencySec: detectedAtSec - (alert.candle_time + tf),
     });
@@ -424,6 +427,7 @@ export class SweepWatcherService {
       engine: v.engine, side: v.side, ok: v.ok, swept_level: v.sweptLevel, tf, market: a.market, symbol: a.symbol,
       block: v.block, notes: v.notes, patternLen: PATTERN_LEN[v.engine], lsccState: v.engine === 'lscc' ? 'CONFIRMED' : undefined,
       structureMeta: v.structureMeta,
+      stochMeta: v.stochMeta,
     });
     const renderMs = this.perf() - r0;
     const track = v.engine === 'lscc' && v.lscc ? this.lscc.get(`${a.symbol}|${tf}|${v.lscc.sweepTime}`) : undefined;
@@ -432,7 +436,7 @@ export class SweepWatcherService {
       id: this.nextId++, symbol: a.symbol, name: a.name, market: a.market, tf, candle_time: sig.time, engine: v.engine, side: v.side,
       ok: v.ok, block: v.block, notes: v.notes, entry: v.entry, swept_level: v.sweptLevel, trade_at_next_open: v.tradeAtNextOpen,
       conflict, trace: v.trace ?? [],
-      created: Math.floor(Date.now() / 1000), live, svg, lscc, structureMeta: v.structureMeta,
+      created: Math.floor(Date.now() / 1000), live, svg, lscc, structureMeta: v.structureMeta, stochMeta: v.stochMeta,
     };
     if (track) {          // the waiting alert becomes the confirmed one: same candidate, new screenshot, the sweep time is kept
       track.state = 'CONFIRMED';

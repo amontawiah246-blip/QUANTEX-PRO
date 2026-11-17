@@ -1,7 +1,7 @@
 // The three strategy engines as RECIPIENTS of a candidate. Each one reads the identical evidence (the candidate's candles) with
 // its own unchanged rules from src/sweepEngines.ts and answers on its own. Nothing here invents a rule.
 import { validOhlc } from './candleMath';
-import { C, EngineName, Verdict, detectContinuation, detectLscc, detectMomentum, detectStructureSweep, detectWickSweep, isFlat } from './sweepEngines';
+import { C, EngineName, Verdict, detectContinuation, detectLscc, detectMomentum, detectStochRsiSweep, detectStructureSweep, detectWickSweep, isFlat } from './sweepEngines';
 import type { Bar } from './patternVerification';
 import type { CandidateEvidence, Side, Validity } from './candidateTypes';
 
@@ -16,6 +16,7 @@ export function runEngine(engine: EngineName, win: C[]): Verdict | null {
   if (engine === 'continuation') return detectContinuation(win, i);
   if (engine === 'lscc') return detectLscc(win, i);
   if (engine === 'structure_sweep') return detectStructureSweep(win, i);
+  if (engine === 'stoch_rsi_sweep') return detectStochRsiSweep(win, i);
   return detectMomentum(win, i);
 }
 

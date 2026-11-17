@@ -113,7 +113,8 @@ export const SYSTEM_PROMPT = [
   'You are the verification analyst of a binary-options signal system (using the chart timeframe and trade expiry specified in each request).',
   'You do NOT create, change or add strategy rules. The strategy rules are listed in the request and are the ONLY conditions that can make a pattern invalid.',
   'Never treat any of these as a pattern condition: engulfing the previous candle, strength of the momentum, choppy or sideways surroundings, your own opinion of the probability, the trend direction, the indicators. They belong to MARKET QUALITY and may only produce warnings.',
-  'Your job: (1) inspect the supplied evidence yourself (the screenshot, when one is attached, and the OHLC numbers), (2) verify the engine\'s arithmetic, (3) point out genuine contradictions, (4) assess the market context, (5) explain and classify the risk.',
+  'When Stoch+RSI+Confirm rules are present in section A, inspect the Stochastic(14,3,3) (80/20 zones), RSI(14) (70/50/30 levels), and the lookback Wick Sweep / Candlestick Pattern shown in the attached screenshot and OHLC numbers strictly according to those rules.',
+  'Your job: (1) inspect the supplied evidence yourself (the screenshot, when one is attached, and the OHLC numbers), (2) verify the engine\'s arithmetic, (3) point out genuine contradictions, (4) assess the market context and calibrate confidence 0-100 based strictly on the setup and market conditions, (5) explain and classify the risk.',
   'Say a pattern is CONTRADICTED only when you can name a rule id from the list whose condition FAILS on the OHLC numbers, and quote the numbers. If evidence is missing or inconsistent, answer INSUFFICIENT_EVIDENCE.',
   'Only claim you inspected the screenshot if an image is attached to this request. Answer with JSON only.',
 ].join('\n');
@@ -143,6 +144,7 @@ const SCHEMA = `{
     "matchesOhlc": true | false | null,
     "disagreement": "<what differs between image and numbers, or null>"
   },
+  "confidence": <integer 0 to 100 based strictly on the strategy setup and current market condition>,
   "explanation": "max 300 characters",
   "risk": "LOW" | "MEDIUM" | "HIGH"
 }`;
@@ -227,6 +229,7 @@ export interface AiAssessment {
     exhaustionOrContinuation: string; quality: 'GOOD' | 'FAIR' | 'POOR'; warnings: string[];
   };
   screenshot: { inspected: boolean; lastCandleTimeSeen: string | null; matchesOhlc: boolean | null; disagreement: string | null };
+  confidence?: number | null;
   explanation: string;
   risk: 'LOW' | 'MEDIUM' | 'HIGH';
 }
@@ -252,7 +255,9 @@ export function parseAiResponse(text: string, req: AiRequest, imageSent: boolean
   const ruleResults = (Array.isArray(p.ruleResults) ? p.ruleResults : []).slice(0, 40).map((r: any) => ({ ruleId: str(r?.ruleId, 60), pass: r?.pass === true, observed: str(r?.observed, 160) }));
   const failed = new Set<string>((Array.isArray(p.failedRuleIds) ? p.failedRuleIds : []).map((x: unknown) => str(x, 60)));
   for (const r of ruleResults) if (!r.pass && r.ruleId) failed.add(r.ruleId);
-  return {
+    const rawConf = Number(j.confidence);
+    const confidence = Number.isFinite(rawConf) ? Math.max(0, Math.min(100, Math.round(rawConf))) : null;
+    return {
     requestId: req.requestId,
     imageSent,
     pattern: { verdict: oneOf(p.verdict, ['CONFIRMED', 'CONTRADICTED', 'INSUFFICIENT_EVIDENCE'] as const, 'pattern verdict'), failedRuleIds: [...failed], ruleResults, notes: str(p.notes, 240) },
@@ -266,6 +271,7 @@ export function parseAiResponse(text: string, req: AiRequest, imageSent: boolean
       inspected: s.inspected === true, lastCandleTimeSeen: s.lastCandleTimeSeen == null ? null : str(s.lastCandleTimeSeen, 60),
       matchesOhlc: typeof s.matchesOhlc === 'boolean' ? s.matchesOhlc : null, disagreement: s.disagreement == null ? null : str(s.disagreement, 200),
     },
+    confidence,
     explanation: str(j.explanation, 320),
     risk: oneOf(j.risk, ['LOW', 'MEDIUM', 'HIGH'] as const, 'risk'),
   };
@@ -294,6 +300,7 @@ export interface Verification {
   aiError: { kind: string; message: string } | null;
   /** true only when the model really received the screenshot AND confirmed it matches the numbers */
   visualVerification: boolean;
+  aiConfidence: number | null;
   explanation: string;
   risk: 'LOW' | 'MEDIUM' | 'HIGH' | null;
   signalAgeSec: number;
@@ -415,6 +422,7 @@ export function reconcile(x: ReconcileInput): Verification {
     aiAvailable: !!ai && !aiError,
     aiError: aiError ? { kind: aiError.kind, message: aiError.message } : null,
     visualVerification: shot === 'VERIFIED',
+    aiConfidence: ai?.confidence ?? null,
     explanation: ai ? ai.explanation : '',
     risk: ai ? ai.risk : null,
     signalAgeSec: x.ageSec,

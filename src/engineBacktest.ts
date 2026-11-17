@@ -22,6 +22,13 @@ import { MOMENTUM_DEFAULTS, MomentumParams, detectMomentumSignal, evaluateMoment
 import { SweepSide, isSweep } from './sweepPatterns';
 import { detectStructureSweepSignal, StructureSweepParams } from './structureSweep';
 import { getGlobalTiming } from './globalConfig';
+import {
+  computeIndicatorSeries,
+  detectStochRsiSweepSignal,
+  IndicatorSeriesSnapshot,
+  STOCH_RSI_DEFAULTS,
+  StochRsiParams,
+} from './stochRsiSweep';
 
 export type Side = 'BUY' | 'SELL';
 export type Segment = 'train' | 'validation' | 'test';
@@ -156,6 +163,34 @@ export function structureSweepStrategy(params?: Partial<StructureSweepParams>): 
           bias: signal.biasDirection,
           event: signal.biasEvent.type,
           breakLevel: signal.breakLevel,
+        },
+      };
+    },
+  };
+}
+
+export function stochRsiSweepStrategy(params?: Partial<StochRsiParams>): StrategyDef {
+  const merged: StochRsiParams = { ...STOCH_RSI_DEFAULTS, ...(params ?? {}) };
+  const seriesCache = new WeakMap<Candle[], IndicatorSeriesSnapshot>();
+  return {
+    id: 'stoch_rsi_sweep',
+    label: 'Stochastic(14,3,3) + RSI(14) + Lookback Wick Sweep / Pattern',
+    group: 'pipeline',
+    detect: (cs, i) => {
+      let series = seriesCache.get(cs);
+      if (!series) {
+        series = computeIndicatorSeries(cs, merged);
+        seriesCache.set(cs, series);
+      }
+      const sig = detectStochRsiSweepSignal(cs, i, merged, series);
+      if (!sig) return null;
+      return {
+        side: sig.side,
+        detail: {
+          stochK: sig.stochK,
+          stochD: sig.stochD,
+          rsi: sig.rsi,
+          confirmations: sig.confirmations.map((c) => c.label).slice(0, 3).join(' + '),
         },
       };
     },
