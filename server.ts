@@ -142,12 +142,14 @@ function startInternalBridge() {
 
   bridgeApp.post('/api/engines', (req, res) => {
     let candles = Array.isArray(req.body?.candles) ? req.body.candles : [];
-    const tf = Number(req.body?.tf || getGlobalTiming().tfSec);
+    const timing = getGlobalTiming();
+    const tf = Number(req.body?.tf || timing.tfSec);
+    const expirySec = req.body?.expirySec !== undefined && Number(req.body.expirySec) > 0 ? Number(req.body.expirySec) : timing.expirySec;
     const minInd = Number(req.body?.minInd || 1);
     // Closed candles only: the newest candle from a broker is usually still forming. `now` is the broker clock (seconds).
     const now = Number(req.body?.now) || Date.now() / 1000;
     if (candles.length && candles[candles.length - 1].time + tf > now) candles = candles.slice(0, -1);
-    const result = evaluateEngines(candles, tf, minInd, typeof req.body?.symbol === 'string' ? req.body.symbol : undefined);
+    const result = evaluateEngines(candles, tf, minInd, typeof req.body?.symbol === 'string' ? req.body.symbol : undefined, expirySec);
     res.json(result);
   });
 

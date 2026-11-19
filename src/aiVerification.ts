@@ -107,14 +107,20 @@ export interface BuildInput {
   key: string;
   /** optional hybrid-engine evidence block (src/hybridEvidence.ts). Context for the AI; it adds no strategy rule. */
   hybridSection?: string | null;
+  /** optional HSIE Historical Setup Intelligence block (src/historicalSetupEngine.ts). Empirical context only; missing matches NEVER invalidate a setup. */
+  hsieSection?: string | null;
+  /** optional QSI + Quantum Pipeline unified block (src/quantumSweepIntel.ts). Context & false-move telemetry only. */
+  qsiSection?: string | null;
 }
 
 export const SYSTEM_PROMPT = [
   'You are the verification analyst of a binary-options signal system (using the chart timeframe and trade expiry specified in each request).',
   'You do NOT create, change or add strategy rules. The strategy rules are listed in the request and are the ONLY conditions that can make a pattern invalid.',
-  'Never treat any of these as a pattern condition: engulfing the previous candle, strength of the momentum, choppy or sideways surroundings, your own opinion of the probability, the trend direction, the indicators. They belong to MARKET QUALITY and may only produce warnings.',
+  'Never treat any of these as a pattern condition: engulfing the previous candle, strength of the momentum, choppy or sideways surroundings, your own opinion of the probability, the trend direction, the indicators, or sparse/zero HSIE historical matches. They belong to MARKET QUALITY / HISTORICAL CONTEXT and may only produce warnings.',
   'When Stoch+RSI+Confirm rules are present in section A, inspect the Stochastic(14,3,3) (80/20 zones), RSI(14) (70/50/30 levels), and the lookback Wick Sweep / Candlestick Pattern shown in the attached screenshot and OHLC numbers strictly according to those rules.',
-  'Your job: (1) inspect the supplied evidence yourself (the screenshot, when one is attached, and the OHLC numbers), (2) verify the engine\'s arithmetic, (3) point out genuine contradictions, (4) assess the market context and calibrate confidence 0-100 based strictly on the setup and market conditions, (5) explain and classify the risk.',
+  'CRITICAL VISUAL CHECK: Inspect the attached screenshot carefully. Verify BOTH that the candlesticks match the OHLC numbers AND that the visual setup shown in the screenshot (the highlighted candles, BUY/SELL direction arrow, swept level / CHoCH break line, and Stochastic/RSI panel curves) matches the proposed direction and setup. If the screenshot arrow, setup framing, or direction disagrees with the proposed trade or OHLC data, set screenshot.setupShownMatches = false (and/or matchesOhlc = false) and explain the discrepancy in screenshot.disagreement.',
+  'When HSIE or QSI sections are present (B3/B4), interpret empirical win/loss evidence, sample-size uncertainty, and false-move risks in your explanation and market warnings, NEVER using missing historical matches to reject a valid setup.',
+  'Your job: (1) inspect the supplied evidence yourself (the screenshot, when one is attached, and the OHLC numbers), (2) verify the engine\'s arithmetic, (3) point out genuine contradictions or wrong-way screenshot annotations, (4) assess the market context and calibrate confidence 0-100 based strictly on the setup and market conditions, (5) explain and classify the risk.',
   'Say a pattern is CONTRADICTED only when you can name a rule id from the list whose condition FAILS on the OHLC numbers, and quote the numbers. If evidence is missing or inconsistent, answer INSUFFICIENT_EVIDENCE.',
   'Only claim you inspected the screenshot if an image is attached to this request. Answer with JSON only.',
 ].join('\n');
@@ -142,7 +148,8 @@ const SCHEMA = `{
     "inspected": true | false,
     "lastCandleTimeSeen": "<the last-candle time printed in the image, exactly as written, or null>",
     "matchesOhlc": true | false | null,
-    "disagreement": "<what differs between image and numbers, or null>"
+    "setupShownMatches": true | false | null,
+    "disagreement": "<what differs between image/setup framing and numbers, or null>"
   },
   "confidence": <integer 0 to 100 based strictly on the strategy setup and current market condition>,
   "explanation": "max 300 characters",
@@ -204,6 +211,8 @@ export function buildAiRequest(i: BuildInput): AiRequest {
     JSON.stringify(marketStructure),
     '',
     ...(i.hybridSection ? ['=== B2. HYBRID ENGINE EVIDENCE ===', i.hybridSection, ''] : []),
+    ...(i.hsieSection ? ['=== B3. HISTORICAL SETUP INTELLIGENCE (HSIE) ===', i.hsieSection, ''] : []),
+    ...(i.qsiSection ? ['=== B4. QUANTUM SWEEP INTELLIGENCE (QSI) & UNIFIED PIPELINE ===', i.qsiSection, ''] : []),
     '=== C. SCREENSHOT ===',
     i.image
       ? `An image is attached. It was drawn from the same candles and feed as the OHLC rows (candle set hash ${i.image.candleSetHash.slice(0, 12)}). Its last candle is printed as "${i.image.lastCandleLabel}". Inspect it, copy that time into lastCandleTimeSeen, and say whether it matches the numbers.`
@@ -228,7 +237,7 @@ export interface AiAssessment {
     regime: string; trendRelation: string; momentum: string; volatility: string; repeatedSweeps: boolean;
     exhaustionOrContinuation: string; quality: 'GOOD' | 'FAIR' | 'POOR'; warnings: string[];
   };
-  screenshot: { inspected: boolean; lastCandleTimeSeen: string | null; matchesOhlc: boolean | null; disagreement: string | null };
+  screenshot: { inspected: boolean; lastCandleTimeSeen: string | null; matchesOhlc: boolean | null; setupShownMatches?: boolean | null; disagreement: string | null };
   confidence?: number | null;
   explanation: string;
   risk: 'LOW' | 'MEDIUM' | 'HIGH';
@@ -269,7 +278,9 @@ export function parseAiResponse(text: string, req: AiRequest, imageSent: boolean
     },
     screenshot: {
       inspected: s.inspected === true, lastCandleTimeSeen: s.lastCandleTimeSeen == null ? null : str(s.lastCandleTimeSeen, 60),
-      matchesOhlc: typeof s.matchesOhlc === 'boolean' ? s.matchesOhlc : null, disagreement: s.disagreement == null ? null : str(s.disagreement, 200),
+      matchesOhlc: typeof s.matchesOhlc === 'boolean' ? s.matchesOhlc : null,
+      setupShownMatches: typeof s.setupShownMatches === 'boolean' ? s.setupShownMatches : null,
+      disagreement: s.disagreement == null ? null : str(s.disagreement, 200),
     },
     confidence,
     explanation: str(j.explanation, 320),
@@ -350,8 +361,10 @@ export function reconcile(x: ReconcileInput): Verification {
     else if (!ai.screenshot.inspected) { shot = 'NOT_INSPECTED'; shotNote = 'the AI says it did not inspect the image'; }
     else if (!ai.screenshot.lastCandleTimeSeen || digits(ai.screenshot.lastCandleTimeSeen) !== digits(request.expectedCandleLabel) || request.image!.lastCandleTime !== request.signalCandleTime) {
       shot = 'STALE'; shotNote = `image last candle "${ai.screenshot.lastCandleTimeSeen ?? 'unreadable'}" is not the signal candle ${request.expectedCandleLabel}`;
-    } else if (ai.screenshot.matchesOhlc === false) { shot = 'MISMATCH'; shotNote = `image and OHLC disagree: ${ai.screenshot.disagreement ?? 'no detail'}`; }
-    else if (ai.screenshot.matchesOhlc === null) { shot = 'NOT_INSPECTED'; shotNote = 'the AI did not say whether the image matches the numbers'; }
+    } else if (ai.screenshot.matchesOhlc === false || ai.screenshot.setupShownMatches === false) {
+      shot = 'MISMATCH';
+      shotNote = `image and setup/OHLC disagree: ${ai.screenshot.disagreement ?? 'visual setup, direction arrow, or OHLC mismatch'}`;
+    } else if (ai.screenshot.matchesOhlc === null) { shot = 'NOT_INSPECTED'; shotNote = 'the AI did not say whether the image matches the numbers'; }
     else { shot = 'VERIFIED'; shotNote = 'image was attached to the model request, read, and matches the OHLC numbers'; }
   } else if (request && imageIncluded && aiError) { shot = 'NOT_INSPECTED'; shotNote = 'the AI request failed, so nothing was inspected'; }
   else if (request && request.image && !ai) { shot = 'NOT_INSPECTED'; shotNote = 'no AI answer'; }
@@ -459,6 +472,20 @@ export function decideExecution(v: Verification, tf: number): Verification['exec
     case 'APPROVED': break;
   }
   if (policy.requireScreenshot && v.screenshotVerification.status !== 'VERIFIED') return no(`policy requires a verified screenshot (status ${v.screenshotVerification.status})`);
+  if (v.aiConfidence !== null && v.aiConfidence < 55) return no(`AI confidence too low (${v.aiConfidence}% < 55%): insufficient market edge`);
+  if (v.marketQuality.deadMarket) return no('dead/compressed market range: insufficient edge to execute');
+  if (v.marketQuality.volatility.state === 'LOW' && (v.marketQuality.grade !== 'GOOD' || v.marketQuality.indicatorAlignment.state !== 'SUPPORTIVE')) {
+    return no('low-volatility market without supportive indicators: insufficient edge');
+  }
+  if (v.marketQuality.indicatorAlignment.state === 'CONTRADICTORY' && v.marketQuality.momentum === 'CONTRADICTORY') {
+    return no('indicators and momentum both contradict the proposed direction');
+  }
+  if (v.risk === 'HIGH' && (v.marketQuality.grade === 'POOR' || v.marketQuality.ai?.quality === 'POOR' || v.marketQuality.indicatorAlignment.state === 'CONTRADICTORY' || v.marketQuality.momentum === 'CONTRADICTORY')) {
+    return no('HIGH risk paired with poor or contradictory market edge');
+  }
+  if (v.marketQuality.repeatedSweeps.count >= 3 && v.marketQuality.grade === 'POOR') {
+    return no(`repeated sweeps (${v.marketQuality.repeatedSweeps.count}) in POOR market quality`);
+  }
   return { eligible: true, reason: v.decision === 'APPROVED' ? 'approved' : 'valid with risk, allowed by policy', engineOnly: false, policy };
 }
 

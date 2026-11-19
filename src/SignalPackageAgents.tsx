@@ -1460,13 +1460,109 @@ export default function SignalPackageAgents({
               ) : (
                 <div className="flex flex-wrap items-center justify-between gap-2 p-3.5 bg-[#050914] border border-[#14203b] rounded-2xl text-xs font-mono">
                   <span className="text-slate-400">
-                    Stoch(14,3,3) + RSI(14) Monitor:
+                    Unified Matrix (Core 6 + Quantum + Hybrid + HSIE + QSI):
                   </span>
-                  <span className="text-slate-200">
+                  <span className="text-slate-200 tabular-nums">
                     {agentStates[activeAgent.symbol]
                       ? `${agentStates[activeAgent.symbol].signalName} · Stoch %K ${agentStates[activeAgent.symbol].stochK.toFixed(1)} / %D ${agentStates[activeAgent.symbol].stochD.toFixed(1)} · RSI ${agentStates[activeAgent.symbol].rsi.toFixed(1)}`
-                      : `Scanning Deriv live market tick flow (${activeTfShort})...`}
+                      : `Scanning Deriv live market tick flow (${activeTfShort} / Exp ${activeExpShort})...`}
                   </span>
+                </div>
+              )}
+
+              {activeSetup && (activeSetup.hsie || activeSetup.qsi) && (
+                <div className="mt-2.5 grid grid-cols-1 lg:grid-cols-12 gap-2.5 font-mono">
+                  {activeSetup.hsie && (
+                    <div className={`${activeSetup.qsi ? "lg:col-span-8" : "lg:col-span-12"} rounded-2xl border border-[#182747] bg-[#060a17] p-3.5`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#14203b] pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-bold tracking-wider text-cyan-300">HISTORICAL SETUP REPORT (HSIE)</span>
+                          <span className="text-[10px] text-slate-400">
+                            Exp {formatTimingLabel(activeSetup.hsie.expirySec)} · {activeSetup.hsie.reliability}
+                          </span>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[10px] font-bold ${
+                            activeSetup.hsie.status === "STRONG_MATCHES"
+                              ? "border-emerald-500/40 bg-emerald-950/40 text-emerald-300"
+                              : activeSetup.hsie.status === "LIMITED_EVIDENCE"
+                              ? "border-amber-500/40 bg-amber-950/40 text-amber-300"
+                              : "border-slate-600/50 bg-slate-900/60 text-slate-300"
+                          }`}
+                        >
+                          {activeSetup.hsie.status.replace(/_/g, " ")}
+                        </span>
+                      </div>
+
+                      <div className="mt-2.5 grid grid-cols-4 gap-2 tabular-nums">
+                        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-1.5">
+                          <div className="text-[10px] text-slate-400">Similar</div>
+                          <div className="text-sm font-bold text-white">{activeSetup.hsie.similarSetups}</div>
+                        </div>
+                        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-1.5">
+                          <div className="text-[10px] text-slate-400">Wins</div>
+                          <div className="text-sm font-bold text-emerald-400">{activeSetup.hsie.wins}</div>
+                        </div>
+                        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-1.5">
+                          <div className="text-[10px] text-slate-400">Losses</div>
+                          <div className="text-sm font-bold text-rose-400">{activeSetup.hsie.losses}</div>
+                        </div>
+                        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-1.5">
+                          <div className="text-[10px] text-slate-400">Win Rate</div>
+                          <div className="text-sm font-bold text-white">
+                            {activeSetup.hsie.winRatePct != null ? `${activeSetup.hsie.winRatePct.toFixed(1)}%` : "—"}
+                          </div>
+                          <div className="text-[9px] text-slate-500">
+                            BE {activeSetup.hsie.breakevenWinRatePct.toFixed(0)}%
+                            {activeSetup.hsie.wilson95CI ? ` · CI ${activeSetup.hsie.wilson95CI[0].toFixed(0)}-${activeSetup.hsie.wilson95CI[1].toFixed(0)}%` : ""}
+                          </div>
+                        </div>
+                      </div>
+
+                      <p className="mt-2 text-[11px] leading-relaxed text-slate-300 font-sans">
+                        {activeSetup.hsie.aiHistoricalExplanation}
+                      </p>
+                      <p className="mt-1 text-[11px] leading-relaxed text-slate-400 font-sans">
+                        {activeSetup.hsie.currentComparison}
+                      </p>
+                      {activeSetup.hsie.sampleWarning && (
+                        <p className="mt-1.5 rounded border border-amber-500/25 bg-amber-950/20 px-2 py-1 text-[10px] text-amber-200/90 font-sans">
+                          {activeSetup.hsie.sampleWarning}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {activeSetup.qsi && (
+                    <div className={`${activeSetup.hsie ? "lg:col-span-4" : "lg:col-span-12"} rounded-2xl border border-[#182747] bg-[#060a17] p-3.5 flex flex-col justify-between`}>
+                      <div>
+                        <div className="flex items-center justify-between gap-2 border-b border-[#14203b] pb-2">
+                          <span className="text-[11px] font-bold tracking-wider text-slate-200">QSI ENGINE RISK</span>
+                          <span
+                            className={`px-2 py-0.5 rounded border text-[10px] font-bold ${
+                              activeSetup.qsi.recommendation === "PASS"
+                                ? "border-emerald-500/40 bg-emerald-950/40 text-emerald-300"
+                                : activeSetup.qsi.recommendation === "CAUTION"
+                                ? "border-amber-500/40 bg-amber-950/40 text-amber-300"
+                                : "border-rose-500/40 bg-rose-950/40 text-rose-300"
+                            }`}
+                          >
+                            {activeSetup.qsi.recommendation} · {activeSetup.qsi.mode.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="mt-2.5 flex items-baseline justify-between tabular-nums">
+                          <span className="text-[11px] text-slate-400">False-Move Risk</span>
+                          <span className="text-lg font-extrabold text-white">{activeSetup.qsi.falseMoveRiskScore}/100</span>
+                        </div>
+                        <p className="mt-2 text-[11px] leading-relaxed text-slate-300 font-sans">
+                          {activeSetup.qsi.summary}
+                        </p>
+                      </div>
+                      <div className="mt-2.5 pt-2 border-t border-[#14203b] text-[10px] text-slate-400 leading-relaxed">
+                        Active Layers: {activeSetup.qsi.engineParticipation.join(" · ")}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

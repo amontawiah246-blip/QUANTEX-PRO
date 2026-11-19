@@ -50,11 +50,16 @@ export class HybridEngine {
   private runStart = -1;
   private n = 0;
   private lastAccepted: Candle | null = null;
-  private pending: Array<{ side: Side; key: string }> = [];
+  private pending: Array<{ side: Side; key: string; entryTime: number; settleAt: number; entryPrice?: number }> = [];
   private openUntil = -Infinity;
 
   constructor(readonly symbol: string, cfg: HybridConfig = HYBRID_DEFAULTS, readonly model: HybridModel | null = null) {
-    if (cfg.tfSec !== 300 || cfg.expirySec !== 300) throw new Error(`the hybrid engine is locked to a 5-minute chart and a 5-minute expiry (got tf ${cfg.tfSec}s, expiry ${cfg.expirySec}s)`);
+    if (!(cfg.tfSec > 0) || !(cfg.expirySec > 0)) {
+      throw new Error(`invalid hybrid timing (tf ${cfg.tfSec}s, expiry ${cfg.expirySec}s)`);
+    }
+    if (cfg.lockFiveMinutes && (cfg.tfSec !== 300 || cfg.expirySec !== 300)) {
+      throw new Error(`the hybrid engine is locked to a 5-minute chart and a 5-minute expiry (got tf ${cfg.tfSec}s, expiry ${cfg.expirySec}s)`);
+    }
     this.cfg = cfg;
     this.configChanges = diffFromDefaults(cfg);
     this.diag = new Diagnostics(cfg.tfSec);
@@ -116,12 +121,23 @@ export class HybridEngine {
     if (this.cs.length > 600) this.cs = this.cs.slice(-300);
     const i = this.cs.length - 1;
     const snap = this.ind.update(c);
-    // outcomes of the setups seen on the previous candle (entry = this open, settle = this close): they become usable for the performance features after the lag
+    // Settle pending setups once entryTime + expirySec has elapsed (entry = next candle open, exit = covering candle close)
+    const remaining: typeof this.pending = [];
     for (const p of this.pending) {
-      const win = p.side === 'BUY' ? (c.close > c.open ? true : c.close < c.open ? false : null) : (c.close < c.open ? true : c.close > c.open ? false : null);
-      this.perf.record(p.key, c.time + tf, win);
+      if (c.time < p.entryTime) {
+        remaining.push(p);
+        continue;
+      }
+      if (p.entryPrice === undefined) p.entryPrice = c.open;
+      if (c.time + tf >= p.settleAt) {
+        const refOpen = p.entryPrice;
+        const win = p.side === 'BUY' ? (c.close > refOpen ? true : c.close < refOpen ? false : null) : (c.close < refOpen ? true : c.close > refOpen ? false : null);
+        this.perf.record(p.key, c.time + tf, win);
+      } else {
+        remaining.push(p);
+      }
     }
-    this.pending = [];
+    this.pending = remaining;
 
     if (H.observedTfSec !== null && H.observedTfSec !== tf) return this.noTrade(g, c, 'TIMEFRAME', `TIMEFRAME_MISMATCH: candles are ${H.observedTfSec} s apart, the engine is locked to ${tf} s`);
     if (this.cs.length < this.cfg.warmupCandles) { H.warmupCandles++; return this.noTrade(g, c, 'WARMUP', `WARMUP: ${this.cs.length} of ${this.cfg.warmupCandles} candles`); }
@@ -169,7 +185,7 @@ export class HybridEngine {
         }
       }
       records.push(rec);
-      this.pending.push({ side: cand.side, key: cand.primary });
+      this.pending.push({ side: cand.side, key: cand.primary, entryTime: closeTime, settleAt: closeTime + this.cfg.expirySec });
     }
 
     // ---- Stage 4: conflicts, open trade, final choice

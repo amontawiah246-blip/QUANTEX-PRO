@@ -22,6 +22,9 @@ import { AiContract, toAiContract } from './src/aiContract';
 import { TradeLog } from './src/tradeLog';
 import { liveConfidence, type LiveConfidence } from './src/liveConfidence';
 import { getGlobalTiming, isSupportedTimeframe } from './src/globalConfig';
+import type { IntelligenceView } from './src/engineEvaluator';
+import { hsiePromptSection, hsieStore, type HsieReport } from './src/historicalSetupEngine';
+import { assessQuantumSweepIntel, qsiPromptSection, type QsiAssessment } from './src/quantumSweepIntel';
 
 export interface Cand { time: number; open: number; high: number; low: number; close: number }
 export interface EngineResult {
@@ -38,8 +41,14 @@ export interface EngineResult {
   stochK?: number;
   stochD?: number;
   reasons: string[];
+  /** Engines 7-12 unified structure/sweep/exhaustion verdict */
+  intelligence?: IntelligenceView;
   /** the hybrid engine's verdict for the newest closed candle (src/hybridEngine.ts). The strategy engines above are never changed by it. */
   hybrid?: HybridView;
+  /** HSIE Historical Setup Intelligence report (strictly empirical & non-blocking) */
+  hsie?: HsieReport | null;
+  /** QSI Quantum Sweep Intelligence false-move risk assessment */
+  qsi?: QsiAssessment | null;
 }
 /** Kept for the existing UI: the old approve/veto shape, now derived from the decision. */
 export interface AiVerdict { status: 'approved' | 'vetoed' | 'unavailable' | 'review'; adjust: number; reason: string; risks: string[] }
@@ -51,6 +60,12 @@ export interface Signal {
   verification: Verification | null;
   /** hybrid gate result for this setup (null = no setup) */
   hybrid: HybridGateResult | null;
+  /** Engines 7-12 structural view */
+  intelligence?: IntelligenceView | null;
+  /** HSIE Historical Setup Intelligence Engine research report (never blocks trades on missing history) */
+  hsie?: HsieReport | null;
+  /** QSI Quantum Sweep Intelligence unified false-move risk report */
+  qsi?: QsiAssessment | null;
   /** the verdict in the project's response contract (APPROVE | REJECT | ABSTAIN | RETRY ...), derived from `verification` */
   contract: AiContract | null;
   /** id of the screenshot the AI inspected: GET /api/signal/screenshot/:id */
@@ -61,10 +76,10 @@ export interface Signal {
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
-export async function runEngines(port: number, candles: Cand[], tf: number, nowSec?: number, symbol?: string): Promise<EngineResult> {
+export async function runEngines(port: number, candles: Cand[], tf: number, nowSec?: number, symbol?: string, expirySec?: number): Promise<EngineResult> {
   const r = await fetch(`http://127.0.0.1:${port}/api/engines`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candles, tf, minInd: 1, now: nowSec, symbol }), signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({ candles, tf, minInd: 1, now: nowSec, symbol, expirySec }), signal: AbortSignal.timeout(20000),
   });
   const d: any = await r.json();
   if (d.status !== 'ok') throw new Error(d.msg || 'engine error');
@@ -79,14 +94,16 @@ function legacyAi(v: Verification, penalty: number): AiVerdict {
 
 const noSetup = (engine: EngineResult, candleTime: number, tf: number): Signal => ({
   engine, ai: null, candleTime, tf, side: null, condition: null, setupName: 'None', setup: false, tradeable: false, confidence: 0,
-  status: engine.status, reasons: engine.reasons, decision: null, verification: null, hybrid: null, contract: null, screenshotId: null, live: null,
+  status: engine.status, reasons: engine.reasons, decision: null, verification: null, hybrid: null,
+  intelligence: engine.intelligence ?? null, hsie: engine.hsie ?? null, qsi: engine.qsi ?? null,
+  contract: null, screenshotId: null, live: null,
 });
 
 /** Builds the final Signal from the engine result and the verification. The engine result is always kept untouched in `engine`. */
 export function merge(engine: EngineResult, v: Verification | null, candleTime: number, tf: number): Signal {
   if (!engine.setup || !v) return noSetup(engine, candleTime, tf);
   const side: 'buy' | 'sell' | null = engine.side === 'BUY' ? 'buy' : engine.side === 'SELL' ? 'sell' : null;
-  const base = { engine, candleTime, tf, condition: null as Condition | null, setupName: 'None', decision: v.decision, verification: v, hybrid: v.hybrid ?? null, contract: null as AiContract | null, screenshotId: v.requestId ?? null, live: null as LiveConfidence | null };
+  const base = { engine, candleTime, tf, condition: null as Condition | null, setupName: 'None', decision: v.decision, verification: v, hybrid: v.hybrid ?? null, intelligence: engine.intelligence ?? null, hsie: engine.hsie ?? null, qsi: engine.qsi ?? null, contract: null as AiContract | null, screenshotId: v.requestId ?? null, live: null as LiveConfidence | null };
   const hyBlock = v.hybrid && !v.hybrid.allow ? `Blocked by the hybrid gate (${v.hybrid.mode}): ${v.hybrid.reason}` : '';
   const penalty = v.decision === 'AI_UNAVAILABLE' ? 0 : v.marketQuality.confidencePenalty;
   const ai = legacyAi(v, penalty);
@@ -94,16 +111,21 @@ export function merge(engine: EngineResult, v: Verification | null, candleTime: 
   switch (v.decision) {
     case 'REJECTED':
       return { ...base, ai, side: null, setup: false, tradeable: false, confidence: 0, status: `Rejected: ${why}`, reasons: [...engine.reasons, `Rejected: ${why}`] };
-    case 'REVIEW':
-      return { ...base, ai, side, setup: true, tradeable: false, confidence: clamp(engine.confidence - penalty, 0, 95), status: `Needs review: ${why}`, reasons: [...engine.reasons, `Review: ${why}`] };
+    case 'REVIEW': {
+      const baseConf = clamp(engine.confidence - penalty, 0, 95);
+      const conf = v.aiConfidence !== null ? Math.min(baseConf, clamp(v.aiConfidence, 0, 95)) : baseConf;
+      return { ...base, ai, side, setup: true, tradeable: false, confidence: conf, status: `Needs review: ${why}`, reasons: [...engine.reasons, `Review: ${why}`] };
+    }
     case 'AI_UNAVAILABLE':
       return { ...base, ai, side, setup: true, tradeable: v.execution.eligible, confidence: engine.confidence, status: `AI unavailable: engine setup kept, not visually verified`, reasons: [...engine.reasons, `AI unavailable: ${v.aiError?.message ?? 'no answer'}`] };
     default: {
       const warn = v.marketQuality.warnings.slice(0, 3);
+      const baseConf = clamp(engine.confidence - penalty, 0, 95);
+      const conf = v.aiConfidence !== null ? Math.min(baseConf, clamp(v.aiConfidence, 0, 95)) : baseConf;
       return {
-        ...base, ai, side, setup: true, tradeable: v.execution.eligible, confidence: clamp(engine.confidence - penalty, 0, 95),
-        status: hyBlock || (v.decision === 'APPROVED' ? 'Verified by the AI' : 'Valid with risk'),
-        reasons: [...engine.reasons, `${v.decision === 'APPROVED' ? 'AI approved' : 'Valid with risk'}: ${v.explanation || why}`, ...(hyBlock ? [hyBlock] : []), ...warn.map((w) => `Warning: ${w}`)],
+        ...base, ai, side, setup: true, tradeable: v.execution.eligible, confidence: conf,
+        status: hyBlock || (!v.execution.eligible ? v.execution.reason : v.decision === 'APPROVED' ? 'Verified by the AI' : 'Valid with risk'),
+        reasons: [...engine.reasons, `${v.decision === 'APPROVED' ? 'AI approved' : 'Valid with risk'}: ${v.explanation || why}`, ...(hyBlock ? [hyBlock] : []), ...(!hyBlock && !v.execution.eligible ? [`Execution blocked: ${v.execution.reason}`] : []), ...warn.map((w) => `Warning: ${w}`)],
       };
     }
   }
@@ -118,12 +140,14 @@ export const ledger = new ExecutionLedger();
 export function resetSignalCaches() { cache.clear(); inflight.clear(); }
 
 export interface SignalDeps {
-  engines(candles: Cand[], tf: number, nowSec?: number, symbol?: string): Promise<EngineResult>;
+  engines(candles: Cand[], tf: number, nowSec?: number, symbol?: string, expirySec?: number): Promise<EngineResult>;
   /** null = no AI configured: every setup becomes AI_UNAVAILABLE (never an approval) */
   ai: AiCaller | null;
   /** SVG -> PNG. undefined = the default (resvg / sharp when installed); null = no screenshots */
   rasterizer?: Rasterizer | null;
   policy?: ExecutionPolicy;
+  /** Explicit trade expiry in seconds (defaults to globalConfig active expirySec) */
+  expirySec?: number;
   /** how the hybrid engine may influence trading (default: HYBRID_AUTOTRADE env, else veto-only) */
   hybridPolicy?: HybridGatePolicy;
   /**
@@ -140,6 +164,8 @@ export interface SignalDeps {
 async function verify(d: SignalDeps, engine: EngineResult, closed: Cand[], tf: number, label: string, key: string, now: number, ageSec: number) {
   const side = engine.side as 'BUY' | 'SELL';
   const policy = d.policy ?? policyFromEnv();
+  const expirySec = d.expirySec && d.expirySec > 0 ? d.expirySec : getGlobalTiming().expirySec;
+  const cleanSym = key.split(':').pop() ?? key;
   const candleTime = closed.length ? closed[closed.length - 1].time : 0;
   const pattern = verifyPattern({
     side,
@@ -155,43 +181,98 @@ async function verify(d: SignalDeps, engine: EngineResult, closed: Cand[], tf: n
   const base = { pattern, quality, ageSec, tf, policy };
   const maxAge = policy.maxSignalAgeSec ?? Math.max(20, tf * 0.5);
   const stale = ageSec > maxAge;
+
+  const activeEngines = pattern.claimed.map((c) => c.engine);
+  const primaryEngine = activeEngines[0] || 'sweep';
+  let hsie: HsieReport | null = engine.hsie ?? null;
+  if (!hsie || hsie.expirySec !== expirySec || hsie.tfSec !== tf || hsie.candlesEvaluated < closed.length) {
+    try {
+      hsie = hsieStore.research({
+        symbol: cleanSym,
+        tfSec: tf,
+        expirySec,
+        candles: closed,
+        side,
+        primaryEngine,
+        activeEngines,
+        includeCrossMarket: true,
+      });
+    } catch {
+      hsie = null;
+    }
+  }
+
+  let qsi: QsiAssessment | null = null;
+  try {
+    qsi = assessQuantumSweepIntel({
+      side,
+      primaryEngine,
+      activeEngines,
+      candles: closed,
+      tfSec: tf,
+      expirySec,
+      intelligence: engine.intelligence ?? null,
+      hybrid: engine.hybrid ?? null,
+      quality,
+      hsie,
+    });
+  } catch {
+    qsi = engine.qsi ?? null;
+  }
+
   // The hybrid layer is judged AFTER the strategy: it can only add evidence and, in veto/require mode, block. It can never create or loosen a setup.
   const gate = gateHybrid(side, engine.hybrid, d.hybridPolicy ?? hybridGatePolicyFromEnv());
-  const evidence = buildHybridEvidence({ label, tf, side, closed, pattern, quality, gate, ageSec, maxAgeSec: maxAge });
+  const evidence = buildHybridEvidence({ label, tf, expirySec, side, closed, pattern, quality, gate, ageSec, maxAgeSec: maxAge });
   const applyGate = (v: Verification, requestId: string | null): Verification => {
     v.hybrid = gate; v.requestId = requestId;
     if (!gate.allow && v.execution.eligible) v.execution = { ...v.execution, eligible: false, reason: `hybrid gate (${gate.mode}): ${gate.reason}` };
+    if (qsi && ((qsi.mode === 'veto' && !qsi.allow) || qsi.recommendation === 'VETO') && v.execution.eligible) {
+      v.execution = { ...v.execution, eligible: false, reason: qsi.summary };
+    }
     return v;
   };
 
   // No AI call when the arithmetic already decides (invalid pattern, missing evidence) or the signal is stale
   if (pattern.status === 'INVALID' || pattern.status === 'INSUFFICIENT_EVIDENCE' || stale) {
-    return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: null }), null) };
+    return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: null }), null), hsie, qsi };
   }
-  if (!d.ai) return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: new AiUnavailableError('NOT_CONFIGURED', 'no AI configured (set GEMINI_API_KEY)') }), null) };
+  if (!d.ai) return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: new AiUnavailableError('NOT_CONFIGURED', 'no AI configured (set GEMINI_API_KEY)') }), null), hsie, qsi };
 
   const rows = closed.slice(-60);
   if (d.image) {
     const why = d.image.lastCandleTime !== candleTime ? `the supplied screenshot ends on ${d.image.lastCandleTime}, the signal candle is ${candleTime}`
       : d.image.candleSetHash !== candleSetHash(rows) ? 'the supplied screenshot was drawn from a different candle set than the numeric data' : '';
-    if (why) return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: new AiUnavailableError('WRONG_REQUEST', `inconsistent evidence: ${why}`) }), null) };
+    if (why) return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError: new AiUnavailableError('WRONG_REQUEST', `inconsistent evidence: ${why}`) }), null), hsie, qsi };
   }
   const sig: EngineView = {
     side, confidence: engine.confidence, agree: engine.agree, reasons: engine.reasons,
     indicators: engine.indicators ? { strategies: engine.indicators.strategies, info: engine.indicators.info } : null,
     pattern: engine.pattern ? { patterns: engine.pattern.patterns } : null,
   };
-  const expirySec = getGlobalTiming().expirySec;
   const idKey = `${key}|${tf}|${expirySec}|${candleTime}|${side}|${candleSetHash(rows)}|${hybridEvidenceHash(evidence)}|${d.image?.sha256 ?? ''}`;
   const hit = cache.get(idKey);
-  if (hit && now - hit.at < TTL_MS) return { condition, v: applyGate(reconcile({ ...base, request: hit.request, ai: hit.ai, aiError: null, cacheHit: true }), hit.request.requestId) };
+  if (hit && now - hit.at < TTL_MS) return { condition, v: applyGate(reconcile({ ...base, request: hit.request, ai: hit.ai, aiError: null, cacheHit: true }), hit.request.requestId), hsie, qsi };
 
   let pending = inflight.get(idKey);
   if (!pending) {
     pending = (async (): Promise<Cached> => {
       const raster = d.rasterizer === undefined ? defaultRasterizer : d.rasterizer;
       const image = d.image !== undefined ? d.image : raster ? await buildScreenshot(closed, side, pattern, label, key.split(':').pop() ?? key, tf, raster, now) : null;
-      const request = buildAiRequest({ engine: sig, label, tf, expirySec, closed, pattern, quality, condition, image, key, hybridSection: gate.mode === 'off' ? null : hybridPromptSection(evidence) });
+      const request = buildAiRequest({
+        engine: sig,
+        label,
+        tf,
+        expirySec,
+        closed,
+        pattern,
+        quality,
+        condition,
+        image,
+        key,
+        hybridSection: gate.mode === 'off' ? null : hybridPromptSection(evidence),
+        hsieSection: hsiePromptSection(hsie),
+        qsiSection: qsiPromptSection(qsi, engine.intelligence ?? null),
+      });
       const res = await d.ai!(request);
       const ai = parseAiResponse(res.text, request, !!request.image && res.imageSent === true);
       const entry = { at: now, request, ai };
@@ -203,10 +284,10 @@ async function verify(d: SignalDeps, engine: EngineResult, closed: Cand[], tf: n
   }
   try {
     const e = await pending;
-    return { condition, v: applyGate(reconcile({ ...base, request: e.request, ai: e.ai, aiError: null }), e.request.requestId) };
+    return { condition, v: applyGate(reconcile({ ...base, request: e.request, ai: e.ai, aiError: null }), e.request.requestId), hsie, qsi };
   } catch (err) {
     const aiError = err instanceof AiUnavailableError ? err : new AiUnavailableError('NETWORK', `AI call failed: ${(err as Error)?.message ?? err}`.slice(0, 160));
-    return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError }), null) };
+    return { condition, v: applyGate(reconcile({ ...base, request: null, ai: null, aiError }), null), hsie, qsi };
   }
 }
 
@@ -215,7 +296,8 @@ export async function getSignal(d: SignalDeps, candles: Cand[], tf: number, labe
   const now = nowSec != null ? nowSec * 1000 : d.now ? d.now() : Date.now();
   const closed = candles.length && candles[candles.length - 1].time >= Math.floor(now / 1000 / tf) * tf ? candles.slice(0, -1) : candles;
   const candleTime = closed.length ? closed[closed.length - 1].time : 0;
-  const engine = await d.engines(candles, tf, nowSec, key.split(':').pop());
+  const expirySec = d.expirySec && d.expirySec > 0 ? d.expirySec : getGlobalTiming().expirySec;
+  const engine = await d.engines(candles, tf, nowSec, key.split(':').pop(), expirySec);
   if (!engine.setup || !engine.side) {
     const ns = noSetup(engine, candleTime, tf);
     try { d.observe?.(ns, { key, label, closed }); } catch { /* logging must never change a signal */ }
@@ -223,8 +305,11 @@ export async function getSignal(d: SignalDeps, candles: Cand[], tf: number, labe
   }
 
   const ageSec = now / 1000 - (candleTime + tf);
-  const { condition, v } = await verify(d, engine, closed, tf, label, key, now, ageSec);
+  const { condition, v, hsie, qsi } = await verify(d, engine, closed, tf, label, key, now, ageSec);
   const sig = merge(engine, v, candleTime, tf);
+  sig.hsie = hsie ?? engine.hsie ?? null;
+  sig.qsi = qsi ?? engine.qsi ?? null;
+  sig.intelligence = engine.intelligence ?? null;
   sig.condition = condition;     // the dashboard's own measurements, untouched: the engine's sweep is reported in `verification`, not written into them
   const names = [
     ...(engine.stochRsiSweep ? ['stoch_rsi_sweep'] : []),
@@ -271,7 +356,7 @@ let caller: AiCaller | null | undefined;
 export function setAiCaller(c: AiCaller | null) { caller = c; }
 export function liveDeps(port: number): SignalDeps {
   if (caller === undefined) caller = createGeminiCaller();
-  return { engines: (c, tf, n, sym) => runEngines(port, c, tf, n, sym), ai: caller, observe: observeSignal, policy: activePolicy };
+  return { engines: (c, tf, n, sym, exp) => runEngines(port, c, tf, n, sym, exp), ai: caller, observe: observeSignal, policy: activePolicy };
 }
 
 let rasterOk: boolean | undefined;
@@ -332,13 +417,15 @@ export function registerSignalRoutes(app: Express, port: number) {
   app.post('/api/signal', async (req, res) => {
     try {
       const candles: Cand[] = Array.isArray(req.body?.candles) ? req.body.candles.slice(-600) : [];
-      const rawTf = req.body?.tf !== undefined ? Number(req.body.tf) : getGlobalTiming().tfSec;
-      const tf = isSupportedTimeframe(rawTf) || rawTf === 30 ? rawTf : getGlobalTiming().tfSec;
+      const timing = getGlobalTiming();
+      const rawTf = req.body?.tf !== undefined ? Number(req.body.tf) : timing.tfSec;
+      const tf = isSupportedTimeframe(rawTf) || rawTf === 30 ? rawTf : timing.tfSec;
+      const expirySec = req.body?.expirySec !== undefined && Number(req.body.expirySec) > 0 ? Number(req.body.expirySec) : timing.expirySec;
       const label = String(req.body?.label ?? req.body?.symbol ?? 'this market').slice(0, 40);
       const nowSec = Number.isFinite(Number(req.body?.now)) && Number(req.body?.now) > 1e9 ? Number(req.body.now) : undefined;
       const nowMs = nowSec != null ? nowSec * 1000 : Date.now();
       const closed = candles.length && candles[candles.length - 1].time >= Math.floor(nowMs / 1000 / tf) * tf ? candles.slice(0, -1) : candles;
-      const s = await getSignal(liveDeps(port), candles, tf, label, String(req.body?.symbol ?? label), nowSec);
+      const s = await getSignal({ ...liveDeps(port), expirySec }, candles, tf, label, String(req.body?.symbol ?? label), nowSec);
       res.json({ status: 'ok', signal: s, levels: computeKeyLevels(closed), closed: closed.slice(-85) });
     } catch (e) {
       res.json({ status: 'error', msg: (e as Error).message });
@@ -371,7 +458,7 @@ export function registerSignalRoutes(app: Express, port: number) {
         while (queue.length) {
           const agent = queue.shift()!;
           try {
-            const raw = await derivBridge.getCandles(agent.symbol, tf, 120);
+            const raw = await derivBridge.getCandles(agent.symbol, tf, 600);
             if (!Array.isArray(raw) || raw.length < 30) continue;
             const candles: Cand[] = raw.map((c: any) => ({
               time: Number(c.time),
@@ -382,7 +469,7 @@ export function registerSignalRoutes(app: Express, port: number) {
             }));
             const closed = candles.length && candles[candles.length - 1].time + tf > nowSec ? candles.slice(0, -1) : candles;
             if (closed.length < 30) continue;
-            const engine = await runEngines(port, candles, tf, nowSec, agent.symbol);
+            const engine = await runEngines(port, candles, tf, nowSec, agent.symbol, expirySec);
             if (!engine.setup || !engine.side) continue;
             const priority = engine.stochRsiSweep ? 300 : engine.agree >= 2 ? 200 : 100;
             const goldBonus = agent.symbol === 'frxXAUUSD' ? 2 : 0;
@@ -424,6 +511,7 @@ export function registerSignalRoutes(app: Express, port: number) {
       for (const cand of candidates.slice(0, 4)) {
         const deps: SignalDeps = {
           ...base,
+          expirySec,
           policy: scanPolicy,
           engines: async () => cand.engine,
         };

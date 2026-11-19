@@ -28,6 +28,8 @@ export interface MarketQuality {
   /** the dashboard's own 20-bar high/low measurement. This is NOT the previous-candle sweep the engine uses. */
   twentyBarHighLowPriceAction: string | null;
   exhaustionOrContinuation: 'EXHAUSTION_SIGNS' | 'CONTINUATION_SIGNS' | 'NONE';
+  /** true when market volatility & recent candle ranges are dead/compressed sideways chop with poor edge */
+  deadMarket: boolean;
   score: number;
   grade: Grade;
   warnings: string[];
@@ -60,7 +62,7 @@ export function assessMarketQuality(side: Side, closed: Bar[], c: Condition | nu
     return {
       source: 'dashboard-market-condition', regime: 'UNKNOWN', trendStrength: null, trendAlignment: 'UNKNOWN', countertrendRisk: false, strongCountertrend: false,
       indicatorAlignment: { state: 'UNKNOWN', supporting: [], contradicting: [] }, momentum: 'UNKNOWN', volatility: { state: 'UNKNOWN', label: 'unknown' },
-      repeatedSweeps: repeated, twentyBarHighLowPriceAction: null, exhaustionOrContinuation: 'NONE',
+      repeatedSweeps: repeated, twentyBarHighLowPriceAction: null, exhaustionOrContinuation: 'NONE', deadMarket: false,
       score: count >= 2 ? 40 : 60, grade: 'UNKNOWN', warnings, confidencePenalty: count >= 2 ? 6 : 3,
     };
   }
@@ -95,11 +97,18 @@ export function assessMarketQuality(side: Side, closed: Bar[], c: Condition | nu
   const momentum: Tri = net > 0.5 ? 'SUPPORTIVE' : net < -1 ? 'CONTRADICTORY' : 'MIXED';
   if (momentum === 'CONTRADICTORY') warnings.push(`Momentum runs against the ${side} (${net.toFixed(1)} ATR over 5 candles)`);
 
-  // volatility
+  // volatility & dead-market compression check
   const volatility = c.volatility === 'Normal' ? { state: 'SUITABLE' as const, label: 'normal' }
     : c.volatility === 'High' ? { state: 'HIGH' as const, label: 'high: candles larger than usual, moves can overshoot' }
       : { state: 'LOW' as const, label: 'low: candles smaller than usual, moves may be slow' };
   if (volatility.state !== 'SUITABLE') warnings.push(`Volatility ${volatility.label}`);
+
+  const recentRanges = closed.slice(-6).map((b) => b.high - b.low);
+  const avgRecentRange = avg(recentRanges);
+  const flatBodies = closed.slice(-6).filter((b) => Math.abs(b.close - b.open) <= 0.18 * atr).length;
+  const deadMarket = (volatility.state === 'LOW' && (c.trendStrength < 22 || flatBodies >= 4))
+    || (avgRecentRange < 0.35 * atr && c.trendStrength < 18 && count >= 2);
+  if (deadMarket) warnings.push('DEAD MARKET: compressed volatility & flat choppy range (poor edge)');
 
   // exhaustion vs continuation
   const net8 = n > 8 ? ((closed[n - 1].close - closed[n - 9].close) / atr) * (buy ? -1 : 1) : 0;   // size of the move INTO the setup, positive = against the side
@@ -114,8 +123,9 @@ export function assessMarketQuality(side: Side, closed: Bar[], c: Condition | nu
   if (countertrendRisk) score -= strongCountertrend ? 25 : 12;
   score -= state === 'CONTRADICTORY' ? 20 : state === 'MIXED' && contradicting.length ? 8 : 0;
   if (momentum === 'CONTRADICTORY') score -= 15;
-  if (volatility.state === 'HIGH') score -= 10; else if (volatility.state === 'LOW') score -= 6;
-  if (count >= 2) score -= 10;
+  if (volatility.state === 'HIGH') score -= 10; else if (volatility.state === 'LOW') score -= 22;
+  if (deadMarket) score = Math.min(42, score - 25);
+  if (count >= 2) score -= 12;
   if (continuation) score -= 10;
   if (exhaustion) score += 5;
   score = Math.max(0, Math.min(100, score));
@@ -124,7 +134,7 @@ export function assessMarketQuality(side: Side, closed: Bar[], c: Condition | nu
   return {
     source: 'dashboard-market-condition', regime, trendStrength: c.trendStrength, trendAlignment, countertrendRisk, strongCountertrend,
     indicatorAlignment: { state, supporting, contradicting }, momentum, volatility, repeatedSweeps: repeated,
-    twentyBarHighLowPriceAction: c.priceAction, exhaustionOrContinuation, score, grade, warnings,
+    twentyBarHighLowPriceAction: c.priceAction, exhaustionOrContinuation, deadMarket, score, grade, warnings,
     confidencePenalty: Math.min(20, Math.round((100 - score) / 5)),
   };
 }

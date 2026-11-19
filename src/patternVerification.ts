@@ -276,11 +276,29 @@ export function verifyPattern(claims: EngineClaims, closed: Bar[], expectedSigna
     if (c.engine === 'sweep') { rules.push(...wickSweepRules(closed, c.side)); level ??= c.side === 'SELL' ? closed[closed.length - 2].high : closed[closed.length - 2].low; }
     else if (c.engine === 'continuation') { rules.push(...continuationRules(closed, c.side)); level ??= c.side === 'SELL' ? closed[closed.length - 4].high : closed[closed.length - 4].low; }
     else if (c.engine === 'lscc') { rules.push(...lsccRules(closed.slice(-60), c.side)); level ??= findLsccSweep(closed.slice(-60), closed.slice(-60).length - 2)?.level ?? null; }
-    else if (c.engine === 'structure_sweep') { rules.push(...structureSweepRules(closed.slice(-60), c.side)); level ??= c.side === 'SELL' ? closed[closed.length - 2].high : closed[closed.length - 2].low; }
+    else if (c.engine === 'structure_sweep') {
+      const warmed = structureSweepRules(closed.slice(-300), c.side);
+      const agentWin = closed.length > 45 ? structureSweepRules(closed.slice(-45), c.side) : warmed;
+      const chosen = warmed.every((r) => r.pass) ? warmed : agentWin.every((r) => r.pass) ? agentWin : structureSweepRules(closed.slice(-60), c.side);
+      rules.push(...chosen);
+      level ??= c.side === 'SELL' ? closed[closed.length - 2].high : closed[closed.length - 2].low;
+    }
     else if (c.engine === 'stoch_rsi_sweep') {
-      const sub = closed.slice(-60);
-      rules.push(...stochRsiSweepRules(sub, c.side));
-      level ??= findLookbackConfirmations(sub, sub.length - 1, c.side)[0]?.level ?? null;
+      const subWarmed = closed.slice(-300);
+      const rWarmed = stochRsiSweepRules(subWarmed, c.side);
+      const subAgent = closed.length > 45 ? closed.slice(-45) : subWarmed;
+      const rAgent = subAgent === subWarmed ? rWarmed : stochRsiSweepRules(subAgent, c.side);
+      const sub60 = closed.length > 60 ? closed.slice(-60) : subWarmed;
+      const r60 = sub60 === subWarmed ? rWarmed : stochRsiSweepRules(sub60, c.side);
+      const [chosenRules, chosenSub] = rWarmed.every((r) => r.pass)
+        ? [rWarmed, subWarmed]
+        : rAgent.every((r) => r.pass)
+          ? [rAgent, subAgent]
+          : r60.every((r) => r.pass)
+            ? [r60, sub60]
+            : [rWarmed, subWarmed];
+      rules.push(...chosenRules);
+      level ??= findLookbackConfirmations(chosenSub, chosenSub.length - 1, c.side)[0]?.level ?? null;
     }
     else rules.push(...momentumRules(closed.slice(-300), c.side));
   }

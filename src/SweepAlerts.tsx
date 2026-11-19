@@ -24,6 +24,27 @@ export interface SweepAlert {
   };
   /** an LSCC alert is updated in place (confirmed or invalid): the new alert replaces this id */
   replaces?: number;
+  hsie?: {
+    status: "STRONG_MATCHES" | "LIMITED_EVIDENCE" | "NO_HISTORICAL_MATCH";
+    reliability: "HIGH" | "MODERATE" | "LOW" | "VERY_LOW" | "NONE";
+    similarSetups: number;
+    wins: number;
+    losses: number;
+    winRatePct: number | null;
+    wilson95CI: [number, number] | null;
+    breakevenWinRatePct: number;
+    expirySec: number;
+    aiHistoricalExplanation: string;
+    currentComparison: string;
+    sampleWarning: string;
+  };
+  qsi?: {
+    mode: "shadow" | "veto";
+    recommendation: "PASS" | "CAUTION" | "VETO";
+    falseMoveRiskScore: number;
+    engineParticipation: string[];
+    summary: string;
+  };
 }
 export interface LsccCard {
   key: string; market: string; direction: "BUY" | "SELL"; state: string; label: string; detail: string; level: number;

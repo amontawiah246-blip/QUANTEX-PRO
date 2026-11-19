@@ -16,9 +16,10 @@ export interface EmaConfig { enabled: boolean; fast: number; slow: number; slope
 
 export interface HybridConfig {
   mode: HybridMode;
-  /** The chart and the trade expiry are both five minutes. These are locked by hybridEngine (a different value is rejected at construction). */
+  /** Chart timeframe (seconds) and trade expiry (seconds). Follows the global timing config unless lockFiveMinutes is explicitly set. */
   tfSec: number;
   expirySec: number;
+  lockFiveMinutes?: boolean;
   indicators: { adx: AdxConfig; atr: AtrConfig; ema: EmaConfig };
   gate: {
     /** The gate can only veto when at least this many indicators are enabled and available. */

@@ -68,6 +68,12 @@ export default function ProMode({ http, balance, isDemo, ready, onToast, onExit 
 
   const run = ap.running;
   const st = ap.st;
+  useEffect(() => {
+    if (!run && !cfg.autoTiming) {
+      setCfg((c) => (c.tfSec === timing.tfSec && c.expirySec === timing.expirySec ? c : { ...c, tfSec: timing.tfSec, expirySec: timing.expirySec }));
+    }
+  }, [run, cfg.autoTiming, timing.tfSec, timing.expirySec]);
+
   const set = (p: Partial<AutoConfig>) => setCfg((c) => { const n = { ...c, ...p }; save(n); return n; });
   const shown = run && ap.cfg ? { ...cfg, ...ap.cfg } : cfg;     // while it runs, show what the server is really using
   const plan = mtgPlan(shown.stake, { on: !!shown.mtg, steps: shown.mtgSteps ?? 2, mult: shown.mtgMult ?? MTG_DEFAULT_MULT });
@@ -131,11 +137,11 @@ export default function ProMode({ http, balance, isDemo, ready, onToast, onExit 
               });
             }}
           >
-            <Zap size={13} /> Auto 5m
+            <Zap size={13} /> 5m Standard
           </button>
         </div>
         {shown.autoTiming ? (
-          <p className="qm-hint">Auto locks all agents to the 5-minute chart with a 5-minute expiry. Choose Global Manual to set any time frame and expiry across all agents.{run && st?.timing ? <> <b>Now: {st.timing}</b></> : null}</p>
+          <p className="qm-hint">5m Standard preset sets the 5-minute chart and 5-minute expiry. Switch to Global Manual to trade any timeframe and expiry across all agents.{run && st?.timing ? <> <b>Now: {st.timing}</b></> : null}</p>
         ) : (
           <>
             <h4 className="qm-lbl">GLOBAL TIME FRAME (ALL AGENTS)</h4>

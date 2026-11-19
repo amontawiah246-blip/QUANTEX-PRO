@@ -7,6 +7,8 @@ import { hybridGatePolicyFromEnv } from './src/hybridGate';
 import { policyFromEnv } from './src/aiVerification';
 import { safetyFromEnv } from './autoServer';
 import { tradeLog } from './signalServer';
+import { hsieStore } from './src/historicalSetupEngine';
+import { getGlobalTiming } from './src/globalConfig';
 
 export function registerHybridRoutes(app: Express) {
   app.get('/api/hybrid/status', (_req, res) => {
@@ -27,5 +29,35 @@ export function registerHybridRoutes(app: Express) {
   app.get('/api/hybrid/analytics', (req, res) => {
     const payout = Math.min(2, Math.max(0.1, Number(req.query.payout) || 0.9));
     res.json({ status: 'ok', analytics: analyze(tradeLog.events(), payout) });
+  });
+
+  app.get('/api/hsie/stats', (_req, res) => {
+    res.json({ status: 'ok', ...hsieStore.getStats() });
+  });
+
+  app.post('/api/hsie/research', (req, res) => {
+    try {
+      const b = req.body ?? {};
+      const timing = getGlobalTiming();
+      const symbol = String(b.symbol || 'LIVE');
+      const tfSec = Number(b.tfSec) > 0 ? Number(b.tfSec) : timing.tfSec;
+      const expirySec = Number(b.expirySec) > 0 ? Number(b.expirySec) : timing.expirySec;
+      const side = String(b.side || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+      const primaryEngine = String(b.primaryEngine || 'sweep');
+      const report = hsieStore.research({
+        symbol,
+        tfSec,
+        expirySec,
+        candles: Array.isArray(b.candles) ? b.candles : undefined,
+        side,
+        primaryEngine,
+        activeEngines: Array.isArray(b.activeEngines) ? b.activeEngines : [primaryEngine],
+        payout: Number(b.payout) > 0 ? Number(b.payout) : 0.9,
+        includeCrossMarket: b.includeCrossMarket !== false,
+      });
+      res.json({ status: 'ok', report });
+    } catch (e: any) {
+      res.status(400).json({ status: 'error', msg: e?.message || 'HSIE research error' });
+    }
   });
 }

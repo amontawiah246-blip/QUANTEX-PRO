@@ -10,6 +10,8 @@ import { ENGINE_WINDOW } from './candidateEngines';
 import { Semaphore, withTimeout } from './concurrency';
 import { StructureSweepSnapshot, analyzeStructureSweep } from './structureSweep';
 import { areMarketTimestampsSynchronized, filterClosedCandles, getGlobalTiming, isConfigTransitioning, isSupportedTimeframe, markAgentSynced } from './globalConfig';
+import { hsieStore, type HsieReport } from './historicalSetupEngine';
+import { assessQuantumSweepIntel, type QsiAssessment } from './quantumSweepIntel';
 
 export interface SweepAlertData {
   id: number;
@@ -41,6 +43,29 @@ export interface SweepAlertData {
   stochMeta?: VerdictStochMeta;
   /** the alert that this one replaced (an LSCC alert is updated in place when its confirmation arrives or fails: same candidate, new id, new screenshot) */
   replaces?: number;
+  /** Compact HSIE Historical Setup Intelligence report (strictly empirical & non-blocking) */
+  hsie?: {
+    status: HsieReport['status'];
+    reliability: HsieReport['reliability'];
+    similarSetups: number;
+    wins: number;
+    losses: number;
+    winRatePct: number | null;
+    wilson95CI: [number, number] | null;
+    breakevenWinRatePct: number;
+    expirySec: number;
+    aiHistoricalExplanation: string;
+    currentComparison: string;
+    sampleWarning: string;
+  };
+  /** Compact QSI Quantum Sweep Intelligence summary across all active engines */
+  qsi?: {
+    mode: QsiAssessment['mode'];
+    recommendation: QsiAssessment['recommendation'];
+    falseMoveRiskScore: number;
+    engineParticipation: string[];
+    summary: string;
+  };
 }
 export interface LsccAlertInfo {
   state: 'WAITING' | 'CONFIRMED' | 'INVALID';
@@ -57,7 +82,8 @@ export interface SweepAgent { symbol: string; name: string; market: string; tf?:
 
 
 const PATTERN_LEN: Record<EngineName, number> = { sweep: 2, momentum: 3, continuation: 4, lscc: 2, structure_sweep: 2, stoch_rsi_sweep: 4 };
-const FETCH = 250;           // candles read per market and check (the hybrid / indicator evidence needs more than the engines' 45)
+const ENGINE_PRIORITY: Record<EngineName, number> = { stoch_rsi_sweep: 6, structure_sweep: 5, lscc: 4, continuation: 3, momentum: 2, sweep: 1 };
+const FETCH = 600;           // deep closed candle history per market check for HSIE, QSI, structure & indicator engines
 const WINDOW = ENGINE_WINDOW; // candles an engine gets to look at
 const KEEP = 500;            // alerts kept in memory
 const DELAY_SEC = 2.5;       // wait after a candle boundary so the broker has published the closed candle
@@ -278,6 +304,9 @@ export class SweepWatcherService {
     }
     const detectedAt = await this.deps.now();
 
+    // Incrementally update per-market, per-timeframe HSIE setup index as closed candles arrive
+    try { hsieStore.ingest(a.symbol, tf, closed); } catch { /* never interrupt agent scanning */ }
+
     const structSnap = analyzeStructureSweep(closed, closed.length - 1);
     if (structSnap) {
       this.structureStates.set(a.symbol, { market: a.market, name: a.name, tf, snapshot: structSnap });
@@ -287,14 +316,22 @@ export class SweepWatcherService {
     for (let i = start; i < closed.length; i++) {
       const win = closed.slice(Math.max(0, i - WINDOW + 1), i + 1);
       if (win.slice(-8).some(isFlat)) continue;               // broker filler candles are not price action
+      const chartHistory = closed.slice(Math.max(0, i - 179), i + 1);
       const found = detectAll(win, win.length - 1);
       const conflict = new Set(found.filter((v) => v.ok).map((v) => v.side)).size > 1;   // BUY and SELL from different engines on one candle
+      const activeEngines = found.filter((x) => x.ok).map((x) => x.engine);
+      const toPublish: Array<{ v: Verdict; alert: SweepAlertData; renderMs: number }> = [];
       for (const v of found) {
-        const made = this.emit(a, tf, win, v, backfill === 0, conflict);
+        const made = this.emit(a, tf, win, v, backfill === 0, conflict, backfill === 0 ? chartHistory : undefined, activeEngines, chartHistory);
         // a LIVE, qualifying setup is broadcast only when not in a mid-transition config change; backfill never broadcasts
         if (made && this.hub && backfill === 0 && v.ok && !isConfigTransitioning()) {
-          await this.publishCandidate(a, tf, closed, v, made.alert, made.renderMs, detectedAt);
+          toPublish.push({ v, alert: made.alert, renderMs: made.renderMs });
         }
+      }
+      // Publish highest-confluence / richest engine first so its enriched screenshot & metadata win version 1 in CandidateHub
+      toPublish.sort((x, y) => ENGINE_PRIORITY[y.v.engine] - ENGINE_PRIORITY[x.v.engine]);
+      for (const item of toPublish) {
+        await this.publishCandidate(a, tf, closed, item.v, item.alert, item.renderMs, detectedAt);
       }
     }
     // the chart of this market may have changed since an earlier candidate was published: tell the recipients (new version, original kept)
@@ -416,14 +453,15 @@ export class SweepWatcherService {
     return [...this.lscc.values()].reverse().slice(0, limit).map((r) => ({ key: `${r.symbol}|${r.tf}|${r.sweepTime}`, symbol: r.symbol, tf: r.tf, side: r.side, state: r.state, alertId: r.alert.id, sweepTime: r.sweepTime, level: r.alert.swept_level, market: r.alert.market, candidateId: r.alert.candidate_id ?? null }));
   }
 
-  private emit(a: SweepAgent, tf: number, win: C[], v: Verdict, live: boolean, conflict = false): { alert: SweepAlertData; renderMs: number } | null {
+  private emit(a: SweepAgent, tf: number, win: C[], v: Verdict, live: boolean, conflict = false, closedForResearch?: C[], activeEngines: string[] = [], chartHistory?: C[]): { alert: SweepAlertData; renderMs: number } | null {
     const sig = win[win.length - 1];
     const key = `${a.symbol}|${tf}|${v.engine}|${sig.time}`;
     if (this.seenKeys.has(key)) return null;
     this.seenKeys.add(key);
     if (this.seenKeys.size > 20000) this.seenKeys.delete(this.seenKeys.values().next().value as string);
     const r0 = this.perf();
-    const svg = renderAlertSvg(win, {
+    const chartCandles = chartHistory && chartHistory.length >= win.length ? chartHistory : win;
+    const svg = renderAlertSvg(chartCandles, {
       engine: v.engine, side: v.side, ok: v.ok, swept_level: v.sweptLevel, tf, market: a.market, symbol: a.symbol,
       block: v.block, notes: v.notes, patternLen: PATTERN_LEN[v.engine], lsccState: v.engine === 'lscc' ? 'CONFIRMED' : undefined,
       structureMeta: v.structureMeta,
@@ -432,11 +470,65 @@ export class SweepWatcherService {
     const renderMs = this.perf() - r0;
     const track = v.engine === 'lscc' && v.lscc ? this.lscc.get(`${a.symbol}|${tf}|${v.lscc.sweepTime}`) : undefined;
     const lscc: LsccAlertInfo | undefined = v.lscc ? { state: 'CONFIRMED', ...v.lscc, sweepDetectedAtMs: track?.sweepAtMs ?? null } : undefined;
+
+    let hsieCompact: SweepAlertData['hsie'];
+    let qsiCompact: SweepAlertData['qsi'];
+    if (live && v.ok && closedForResearch && closedForResearch.length >= 30) {
+      try {
+        const expirySec = getGlobalTiming().expirySec;
+        const rep = hsieStore.research({
+          symbol: a.symbol,
+          tfSec: tf,
+          expirySec,
+          candles: closedForResearch,
+          currentCandleTime: sig.time,
+          side: v.side,
+          primaryEngine: v.engine,
+          activeEngines: activeEngines.length ? activeEngines : [v.engine],
+          includeCrossMarket: true,
+        });
+        hsieCompact = {
+          status: rep.status,
+          reliability: rep.reliability,
+          similarSetups: rep.similarSetups,
+          wins: rep.wins,
+          losses: rep.losses,
+          winRatePct: rep.winRatePct,
+          wilson95CI: rep.wilson95CI,
+          breakevenWinRatePct: rep.breakevenWinRatePct,
+          expirySec: rep.expirySec,
+          aiHistoricalExplanation: rep.aiHistoricalExplanation,
+          currentComparison: rep.currentComparison,
+          sampleWarning: rep.sampleWarning,
+        };
+        const qsiRes = assessQuantumSweepIntel({
+          side: v.side,
+          primaryEngine: v.engine,
+          activeEngines: activeEngines.length ? activeEngines : [v.engine],
+          candles: closedForResearch,
+          tfSec: tf,
+          expirySec,
+          hsie: rep,
+        });
+        qsiCompact = {
+          mode: qsiRes.mode,
+          recommendation: qsiRes.recommendation,
+          falseMoveRiskScore: qsiRes.falseMoveRiskScore,
+          engineParticipation: qsiRes.engineParticipation,
+          summary: qsiRes.summary,
+        };
+      } catch {
+        /* non-fatal */
+      }
+    }
+
     const alert: SweepAlertData = {
       id: this.nextId++, symbol: a.symbol, name: a.name, market: a.market, tf, candle_time: sig.time, engine: v.engine, side: v.side,
       ok: v.ok, block: v.block, notes: v.notes, entry: v.entry, swept_level: v.sweptLevel, trade_at_next_open: v.tradeAtNextOpen,
       conflict, trace: v.trace ?? [],
       created: Math.floor(Date.now() / 1000), live, svg, lscc, structureMeta: v.structureMeta, stochMeta: v.stochMeta,
+      ...(hsieCompact ? { hsie: hsieCompact } : {}),
+      ...(qsiCompact ? { qsi: qsiCompact } : {}),
     };
     if (track) {          // the waiting alert becomes the confirmed one: same candidate, new screenshot, the sweep time is kept
       track.state = 'CONFIRMED';

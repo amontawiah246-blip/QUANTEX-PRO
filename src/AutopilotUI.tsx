@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Square, X } from "lucide-react";
 import { apiFetch } from "./api";
 import { AutoConfig, AutoState, DEFAULT_CFG } from "./autopilot";
+import { BROKER_TIMEFRAME_OPTIONS } from "./globalConfig";
 
 const CFG_KEY = "qx-auto-cfg";
 export const loadCfg = (): AutoConfig => {
@@ -49,7 +50,7 @@ export function useAutopilot(http: string) {
 }
 
 // ---------------------------------------------------------------- confirmation + settings
-const TFS = [{ l: "S30", s: 30 }, { l: "M1", s: 60 }, { l: "M5", s: 300 }];
+const TFS = [{ l: "S30", s: 30 }, ...BROKER_TIMEFRAME_OPTIONS.map((t) => ({ l: t.label, s: t.sec }))];
 
 export function AutopilotModal({ brokerName, broker, account, defaultStake, onStart, onCancel, onSwitchAccount }: {
   brokerName: string; broker: string; account: "DEMO" | "REAL" | "UNKNOWN"; defaultStake: number; onStart: (c: AutoConfig) => void; onCancel: () => void; onSwitchAccount?: (demo: boolean) => void;

@@ -55,9 +55,24 @@ export function gateHybrid(engineSide: 'BUY' | 'SELL', view: HybridView | null |
   if (view.stage === 'WARMUP') return done('NO_OPINION', view.reason, false);
 
   if (view.action === engineSide) return done('CONFIRMS', `hybrid agrees: ${view.reason}`, false);
-  if (view.action !== 'NO_TRADE') return done('VETO_OPPOSITE', `hybrid trades the opposite side (${view.action}): ${view.reason}`, true);
+  if (view.action !== 'NO_TRADE') {
+    const opp = view.bySide?.[view.action];
+    const oppOnlyWeakStrong = !!opp?.patterns?.length && opp.patterns.every((p) => p === 'WEAK_STRONG_STRONG');
+    if (!oppOnlyWeakStrong) {
+      return done('VETO_OPPOSITE', `hybrid trades the opposite side (${view.action}): ${view.reason}`, true);
+    }
+    return done('NO_OPINION', `hybrid opposite hypothesis is WEAK_STRONG_STRONG only (${view.action}): not vetoing primary ${engineSide} setup`, false);
+  }
 
   if (!mine) return done('NO_OPINION', view.stage === 'NO_SETUP' ? 'the hybrid candlestick stage sees no setup for this side' : (view.reason || 'no hybrid record for this side'), false);
+  if (mine.rejectionStage === 'CONFLICT') {
+    const oppSide = engineSide === 'BUY' ? 'SELL' : 'BUY';
+    const opp = view.bySide?.[oppSide];
+    const oppOnlyWeakStrong = !!opp?.patterns?.length && opp.patterns.every((p) => p === 'WEAK_STRONG_STRONG');
+    if (oppOnlyWeakStrong) {
+      return done('NO_OPINION', `hybrid conflict involved WEAK_STRONG_STRONG hypothesis only: not vetoing ${engineSide}`, false);
+    }
+  }
   const status = mine.rejectionStage ? VETO_STAGES[mine.rejectionStage] : undefined;
   if (status) return done(status, `hybrid ${mine.rejectionStage}: ${mine.rejectionReason ?? 'rejected'}`, true);
   if (mine.rejectionStage === 'MODEL_UNAVAILABLE') return done('UNAVAILABLE', `hybrid model unavailable: ${mine.rejectionReason ?? ''}`, false);

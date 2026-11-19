@@ -307,13 +307,13 @@ export function renderAlertSvg(
   if (sweepArrowOnCandle) {
     const ax = x(n - 1);
     if (buy) {
-      const tip = y(sig.low) + 22;
+      const tip = Math.max(T + 20, Math.min(B - 86, y(sig.low) + 18));
       s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 24 h12 v28 h12 v-28 h12 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 82).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 78).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
     } else {
-      const tip = y(sig.high) - 22;
+      const tip = Math.min(B - 20, Math.max(T + 86, y(sig.high) - 18));
       s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 -24 h12 v-28 h12 v28 h12 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 62).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 60).toFixed(1)}" fill="${colour}" font-size="26" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
     }
   } else if (o.engine === 'lscc' && o.lsccState && o.lsccState !== 'CONFIRMED') {
     // waiting or invalid: no entry arrow. Nothing is traded on a sweep alone.
@@ -322,15 +322,15 @@ export function renderAlertSvg(
     const ax = x(n), cy = y(sig.close);
     s.push(`<line x1="${x(n - 1).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${ax.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${colour}" stroke-width="2" stroke-dasharray="3 6" opacity=".6"/>`);
     if (buy) {
-      const tip = cy - 36;                      // arrow points UP, label above
+      const tip = Math.max(T + 50, Math.min(B - 58, cy - 28));                      // arrow points UP, label above inside [T, B]
       s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 24 h12 v28 h12 v-28 h12 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 30).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 28).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('BUY')}</text>`);
       s.push(`<text x="${ax.toFixed(1)}" y="${(tip - 8).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
     } else {
-      const tip = cy + 36;                      // arrow points DOWN, label below
+      const tip = Math.min(B - 56, Math.max(T + 58, cy + 28));                      // arrow points DOWN, label below inside [T, B]
       s.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 -24 h12 v-28 h12 v28 h12 z" fill="${colour}"/>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 30).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
-      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 52).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 28).toFixed(1)}" fill="${colour}" font-size="24" font-weight="800" text-anchor="middle">${label('SELL')}</text>`);
+      s.push(`<text x="${ax.toFixed(1)}" y="${(tip + 48).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
     }
   }
 

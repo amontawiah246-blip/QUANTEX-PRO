@@ -8,6 +8,9 @@ import { Analysis, Candle, Outcome, outcomeOf } from "./analysis";
 import type { Condition } from "./conditions";
 import { formatTimingLabel } from "./globalConfig";
 import { useGlobalTiming } from "./useGlobalTiming";
+import type { HsieReport } from "./historicalSetupEngine";
+import type { QsiAssessment } from "./quantumSweepIntel";
+import type { IntelligenceView } from "./engineEvaluator";
 
 export const BINARY_BROKERS = ["deriv"];
 const MTG = [{ label: "No MTG", v: 0 }, { label: "MTG 1", v: 1 }, { label: "MTG 2", v: 2 }, { label: "MTG 3", v: 3 }];
@@ -88,8 +91,25 @@ interface Props {
 }
 
 
-/** What the server pipeline (3 engines + AI check) said, trimmed to what the screen shows. */
-interface SigInfo { agree: number; sweep: boolean; ind: number; pattern: boolean; ai: string; aiReason: string; verified: boolean; risks: string[]; decision?: string; visual?: boolean; hybrid?: string; shot?: string; issues?: string[] }
+/** What the server pipeline (all core + Quantum + Hybrid + HSIE + QSI engines + AI check) said. */
+interface SigInfo {
+  agree: number;
+  sweep: boolean;
+  ind: number;
+  pattern: boolean;
+  ai: string;
+  aiReason: string;
+  verified: boolean;
+  risks: string[];
+  decision?: string;
+  visual?: boolean;
+  hybrid?: string;
+  shot?: string;
+  issues?: string[];
+  hsie?: HsieReport | null;
+  qsi?: QsiAssessment | null;
+  intelligence?: IntelligenceView | null;
+}
 const strengthOf = (c: number): Analysis["strength"] => (c >= 80 ? "Very high" : c >= 72 ? "High" : c >= 64 ? "Medium" : "Low");
 
 const dec = (v: number) => (v >= 100 ? 3 : v >= 10 ? 4 : 5);
@@ -212,7 +232,7 @@ export default function SignalsPage({ wsBase, apiBase, broker, setBroker, asset,
       // 2. the server runs the three engines in the background and asks the AI to verify; nothing is drawn on the chart
       let sg: any;
       try {
-        const r = await fetch(`${apiBase}/api/signal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ candles, tf: tfSec, symbol: `${broker}:${sym}`, label: mLabel, now: Date.now() / 1000 + clockOff.current }) });
+        const r = await fetch(`${apiBase}/api/signal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ candles, tf: tfSec, expirySec, symbol: `${broker}:${sym}`, label: mLabel, now: Date.now() / 1000 + clockOff.current }) });
         const d = await r.json();
         if (d.status !== "ok") throw new Error(d.msg || "Signal service error");
         sg = d.signal;
@@ -228,7 +248,24 @@ export default function SignalsPage({ wsBase, apiBase, broker, setBroker, asset,
       const a: Analysis = { side: sg.side, confidence: sg.confidence, strength: strengthOf(sg.confidence), live: sg.live ?? null, score: sg.side === "buy" ? 1 : -1, price: candles[candles.length - 1].close,
         reasons: (sg.reasons as string[]).map((t) => ({ text: t, bias: sg.side })), stats: { rsi: 0, macd: 0, ema9: 0, ema21: 0, ema50: 0, bb: 0, stochK: 0, atr: 0 } };
       setCond(sg.condition ?? null); setSetupName(sg.setupName ?? "");
-      setSig({ agree: sg.engine.agree, sweep: !!sg.engine.sweep, ind: sg.engine.indicators && sg.engine.indicators.side === sg.engine.side ? sg.engine.indicators.count : 0, pattern: !!sg.engine.pattern?.counted, ai: sg.ai?.status ?? "unavailable", aiReason: sg.ai?.reason ?? "", verified: !!sg.tradeable, risks: sg.ai?.risks ?? [], decision: sg.decision ?? undefined, visual: !!sg.verification?.visualVerification, hybrid: sg.hybrid && sg.hybrid.mode !== "off" ? `${String(sg.hybrid.status).replace(/_/g, " ").toLowerCase()}${sg.hybrid.probability != null ? ` · P(win) ${sg.hybrid.probability.toFixed(3)}` : ""}${sg.hybrid.allow ? "" : " · BLOCKS this trade"}` : undefined, shot: sg.screenshotId ?? undefined, issues: sg.contract?.detected_issues?.slice(0, 4) });
+      setSig({
+        agree: sg.engine.agree,
+        sweep: !!sg.engine.sweep,
+        ind: sg.engine.indicators && sg.engine.indicators.side === sg.engine.side ? sg.engine.indicators.count : 0,
+        pattern: !!sg.engine.pattern?.counted,
+        ai: sg.ai?.status ?? "unavailable",
+        aiReason: sg.ai?.reason ?? "",
+        verified: !!sg.tradeable,
+        risks: sg.ai?.risks ?? [],
+        decision: sg.decision ?? undefined,
+        visual: !!sg.verification?.visualVerification,
+        hybrid: sg.hybrid && sg.hybrid.mode !== "off" ? `${String(sg.hybrid.status).replace(/_/g, " ").toLowerCase()}${sg.hybrid.probability != null ? ` · P(win) ${sg.hybrid.probability.toFixed(3)}` : ""}${sg.hybrid.allow ? "" : " · BLOCKS this trade"}` : undefined,
+        shot: sg.screenshotId ?? undefined,
+        issues: sg.contract?.detected_issues?.slice(0, 4),
+        hsie: sg.hsie ?? sg.engine?.hsie ?? null,
+        qsi: sg.qsi ?? sg.engine?.qsi ?? null,
+        intelligence: sg.intelligence ?? sg.engine?.intelligence ?? null,
+      });
       const base = Math.max(candles[candles.length - 1].time, ...Object.keys(candleMap.current).map(Number));
       const t0 = base + tfSec;
       const id = Date.now() * 10 + (rowId.current++ % 10);
@@ -617,6 +654,8 @@ export default function SignalsPage({ wsBase, apiBase, broker, setBroker, asset,
               {sig?.hybrid && <p className="sg-disc">Hybrid engine: {sig.hybrid}</p>}
               {sig?.issues && sig.issues.length > 0 && <p className="sg-disc">AI notes: {sig.issues.join(" · ")}</p>}
               {sig?.shot && <details className="sg-disc"><summary>Chart the AI inspected</summary><img alt="Annotated chart sent to the AI" src={`${apiBase}/api/signal/screenshot/${sig.shot}`} style={{ maxWidth: "100%", borderRadius: 8, marginTop: 8 }} /></details>}
+              {sig?.hsie && <HsieReportCard hsie={sig.hsie} expLabel={expLabel} />}
+              {sig?.qsi && <QsiReadoutCard qsi={sig.qsi} />}
               {track && <Tracker track={track} now={serverNow} tfLabel={tfLabel} />}
               {cond && <CondBox c={cond} setup={setupName || "None"} />}
               <h4 className="sg-why">Why this signal</h4>
@@ -675,6 +714,160 @@ function Tracker({ track, now, tfLabel }: { track: Track; now: number; tfLabel: 
         {track.final === "loss" && <>Result: <b>LOSS</b> after all steps</>}
         {track.final === "draw" && <>Result: <b>DRAW</b> (stake returned)</>}
         {track.final === "unknown" && <>Could not read the result from the feed</>}
+      </div>
+    </div>
+  );
+}
+
+function HsieReportCard({ hsie, expLabel }: { hsie: HsieReport; expLabel: string }) {
+  const statusTone =
+    hsie.status === "STRONG_MATCHES"
+      ? "text-emerald-300 border-emerald-500/40 bg-emerald-950/40"
+      : hsie.status === "LIMITED_EVIDENCE"
+      ? "text-amber-300 border-amber-500/40 bg-amber-950/40"
+      : "text-slate-300 border-slate-600/50 bg-slate-900/60";
+  const statusLabel =
+    hsie.status === "STRONG_MATCHES"
+      ? "STRONG MATCHES"
+      : hsie.status === "LIMITED_EVIDENCE"
+      ? "LIMITED EVIDENCE"
+      : "NO HISTORICAL MATCH";
+
+  return (
+    <div className="mt-3 rounded-xl border border-[#1a2847] bg-[#060a17] p-3.5 text-left font-mono">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#162340] pb-2">
+        <div>
+          <div className="text-[11px] font-bold tracking-wider text-cyan-300">HISTORICAL SETUP REPORT (HSIE)</div>
+          <div className="text-[10px] text-slate-400">
+            {hsie.market} · Exp {expLabel} ({hsie.expirySimulationMode.replace(/_/g, " ")}) · Reliability: {hsie.reliability}
+          </div>
+        </div>
+        <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${statusTone}`}>
+          {statusLabel}
+        </span>
+      </div>
+
+      <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4 tabular-nums">
+        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-2">
+          <div className="text-[10px] text-slate-400">Similar setups</div>
+          <div className="text-base font-bold text-white">{hsie.similarSetups}</div>
+          <div className="text-[10px] text-slate-500">of {hsie.totalPriorSetups} prior</div>
+        </div>
+        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-2">
+          <div className="text-[10px] text-slate-400">Wins</div>
+          <div className="text-base font-bold text-emerald-400">{hsie.wins}</div>
+          <div className="text-[10px] text-slate-500">{hsie.ties > 0 ? `${hsie.ties} ties` : "resolved"}</div>
+        </div>
+        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-2">
+          <div className="text-[10px] text-slate-400">Losses</div>
+          <div className="text-base font-bold text-rose-400">{hsie.losses}</div>
+          <div className="text-[10px] text-slate-500">BE {hsie.breakevenWinRatePct.toFixed(1)}%</div>
+        </div>
+        <div className="rounded-lg border border-[#14203b] bg-[#0b1224] px-2.5 py-2">
+          <div className="text-[10px] text-slate-400">Historical win rate</div>
+          <div className="text-base font-bold text-white">
+            {hsie.winRatePct != null ? `${hsie.winRatePct.toFixed(1)}%` : "—"}
+          </div>
+          <div className="text-[10px] text-slate-400">
+            {hsie.wilson95CI ? `95% CI ${hsie.wilson95CI[0].toFixed(0)}–${hsie.wilson95CI[1].toFixed(0)}%` : "Insufficient sample"}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-[11px] text-slate-300 sm:grid-cols-2 tabular-nums">
+        <div className="rounded border border-[#14203b] bg-[#091020] px-2.5 py-1.5">
+          <span className="text-slate-400">Regime: </span>
+          <span>Trend {hsie.regimeBreakdown.trending.winRatePct != null ? `${hsie.regimeBreakdown.trending.winRatePct.toFixed(0)}% (n=${hsie.regimeBreakdown.trending.n})` : `— (n=${hsie.regimeBreakdown.trending.n})`}</span>
+          <span className="text-slate-500"> · </span>
+          <span>Range {hsie.regimeBreakdown.ranging.winRatePct != null ? `${hsie.regimeBreakdown.ranging.winRatePct.toFixed(0)}% (n=${hsie.regimeBreakdown.ranging.n})` : `— (n=${hsie.regimeBreakdown.ranging.n})`}</span>
+        </div>
+        <div className="rounded border border-[#14203b] bg-[#091020] px-2.5 py-1.5">
+          <span className="text-slate-400">Chrono split: </span>
+          {hsie.chronologicalValidation ? (
+            <span>
+              Early {hsie.chronologicalValidation.earlierWinRatePct != null ? `${hsie.chronologicalValidation.earlierWinRatePct.toFixed(0)}%` : "—"} (n={hsie.chronologicalValidation.earlierCount})
+              {" · "}
+              Recent {hsie.chronologicalValidation.recentWinRatePct != null ? `${hsie.chronologicalValidation.recentWinRatePct.toFixed(0)}%` : "—"} (n={hsie.chronologicalValidation.recentCount})
+            </span>
+          ) : (
+            <span>Not enough chronological samples</span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2.5 space-y-1.5 text-xs leading-relaxed text-slate-200 font-sans">
+        <p><span className="font-mono text-[10px] uppercase text-cyan-300">Historical explanation: </span>{hsie.aiHistoricalExplanation}</p>
+        <p><span className="font-mono text-[10px] uppercase text-slate-400">Current comparison: </span>{hsie.currentComparison}</p>
+        {(hsie.winnerTraits || hsie.loserTraits) && (
+          <p className="text-[11px] text-slate-400">
+            {hsie.winnerTraits ? `Winners: ${hsie.winnerTraits.notes.join("; ")}. ` : ""}
+            {hsie.loserTraits ? `Losers: ${hsie.loserTraits.notes.join("; ")}.` : ""}
+          </p>
+        )}
+      </div>
+
+      {hsie.sampleWarning && (
+        <div className="mt-2 rounded border border-amber-500/25 bg-amber-950/20 px-2.5 py-1.5 text-[11px] text-amber-200/90 font-sans">
+          {hsie.sampleWarning}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QsiReadoutCard({ qsi }: { qsi: QsiAssessment }) {
+  const tone =
+    qsi.recommendation === "PASS"
+      ? "text-emerald-300 border-emerald-500/40 bg-emerald-950/30"
+      : qsi.recommendation === "CAUTION"
+      ? "text-amber-300 border-amber-500/40 bg-amber-950/30"
+      : "text-rose-300 border-rose-500/40 bg-rose-950/30";
+
+  return (
+    <div className="mt-2.5 rounded-xl border border-[#1a2847] bg-[#060a17] p-3 text-left font-mono">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-bold tracking-wider text-slate-200">
+          UNIFIED ENGINE & FALSE-MOVE RISK (QSI)
+        </div>
+        <div className="flex items-center gap-2 text-[10px] tabular-nums">
+          <span className="text-slate-400">Risk {qsi.falseMoveRiskScore}/100</span>
+          <span className={`rounded border px-2 py-0.5 font-bold ${tone}`}>
+            {qsi.recommendation} · {qsi.mode.toUpperCase()}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-2 grid grid-cols-5 gap-1.5 text-center text-[10px] tabular-nums">
+        <div className="rounded border border-[#14203b] bg-[#0b1224] py-1">
+          <div className="text-slate-500">Sweep</div>
+          <div className="font-bold text-slate-200">{qsi.componentScores.sweepAnatomy}</div>
+        </div>
+        <div className="rounded border border-[#14203b] bg-[#0b1224] py-1">
+          <div className="text-slate-500">Reject</div>
+          <div className="font-bold text-slate-200">{qsi.componentScores.rejectionQuality}</div>
+        </div>
+        <div className="rounded border border-[#14203b] bg-[#0b1224] py-1">
+          <div className="text-slate-500">Mom</div>
+          <div className="font-bold text-slate-200">{qsi.componentScores.momentumExhaustion}</div>
+        </div>
+        <div className="rounded border border-[#14203b] bg-[#0b1224] py-1">
+          <div className="text-slate-500">Struct</div>
+          <div className="font-bold text-slate-200">{qsi.componentScores.contextStructure}</div>
+        </div>
+        <div className="rounded border border-[#14203b] bg-[#0b1224] py-1">
+          <div className="text-slate-500">Hist</div>
+          <div className="font-bold text-slate-200">{qsi.componentScores.historicalContext}</div>
+        </div>
+      </div>
+
+      <div className="mt-2 text-[11px] text-slate-300 font-sans">
+        <div>{qsi.summary}</div>
+        <div className="mt-1 font-mono text-[10px] text-slate-400">
+          Engines: {qsi.engineParticipation.join(" · ")}
+        </div>
+        {qsi.conflicts.length > 0 && (
+          <div className="mt-1 text-[11px] text-amber-300">Conflicts: {qsi.conflicts.join(" · ")}</div>
+        )}
       </div>
     </div>
   );

@@ -49,6 +49,22 @@ export function renderPlainSvg(allCandles: Bar[], side: Side, market: string, tf
     const top = y(Math.max(c.open, c.close)), bot = y(Math.min(c.open, c.close));
     out.push(`<rect x="${(xx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(bot - top, 2).toFixed(1)}" fill="${col}"/>`);
   });
+  const sig = cs[n - 1];
+  const ax = x(n), cy = y(sig.close);
+  const buy = side === 'BUY';
+  const arrowCol = buy ? GREEN : RED;
+  out.push(`<line x1="${x(n - 1).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${ax.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${arrowCol}" stroke-width="2" stroke-dasharray="3 6" opacity="0.65"/>`);
+  if (buy) {
+    const tip = Math.max(T + 50, Math.min(B - 58, cy - 28));
+    out.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 24 h12 v28 h12 v-28 h12 z" fill="${arrowCol}"/>`);
+    out.push(`<text x="${ax.toFixed(1)}" y="${(tip - 28).toFixed(1)}" fill="${arrowCol}" font-size="24" font-weight="800" text-anchor="middle">BUY</text>`);
+    out.push(`<text x="${ax.toFixed(1)}" y="${(tip - 8).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
+  } else {
+    const tip = Math.min(B - 56, Math.max(T + 58, cy + 28));
+    out.push(`<path d="M${ax.toFixed(1)} ${tip.toFixed(1)} l-18 -24 h12 v-28 h12 v28 h12 z" fill="${arrowCol}"/>`);
+    out.push(`<text x="${ax.toFixed(1)}" y="${(tip + 28).toFixed(1)}" fill="${arrowCol}" font-size="24" font-weight="800" text-anchor="middle">SELL</text>`);
+    out.push(`<text x="${ax.toFixed(1)}" y="${(tip + 48).toFixed(1)}" fill="${DIM}" font-size="15" text-anchor="middle">next open</text>`);
+  }
   const tfl = tf < 60 ? `${tf}s` : `${Math.floor(tf / 60)}m`;
   out.push(`<text x="${W / 2}" y="52" fill="#fff" font-size="34" font-weight="700" text-anchor="middle">${side} signal \u2013 Price + EMA + RSI(14) + Stoch(14,3,3)</text>`);
   out.push(`<text x="${W / 2}" y="92" fill="${DIM}" font-size="22" text-anchor="middle">${esc(market)} \u00b7 ${tfl} \u00b7 last closed candle ${candleLabel(cs[n - 1].time)}</text>`);
@@ -57,14 +73,15 @@ export function renderPlainSvg(allCandles: Bar[], side: Side, market: string, tf
 }
 
 const PATTERN_LEN: Record<SweepEngineKey, number> = { sweep: 2, momentum: 3, continuation: 4, lscc: 3, structure_sweep: 2, stoch_rsi_sweep: 4 };
+const ENGINE_PRIORITY: Record<SweepEngineKey, number> = { stoch_rsi_sweep: 6, structure_sweep: 5, lscc: 4, continuation: 3, momentum: 2, sweep: 1 };
 
 export function renderSignalSvg(closed: Bar[], side: Side, pattern: PatternVerification, market: string, symbol: string, tf: number): string {
-  const first = pattern.claimed[0];
-  const cs = closed.slice(-60);
-  if (!first || (pattern.sweptLevel == null && first.engine !== 'stoch_rsi_sweep')) return renderPlainSvg(cs, side, market, tf);
+  const best = [...pattern.claimed].sort((a, b) => ENGINE_PRIORITY[b.engine] - ENGINE_PRIORITY[a.engine])[0];
+  const cs = closed.slice(-180);
+  if (!best || (pattern.sweptLevel == null && best.engine !== 'stoch_rsi_sweep' && best.engine !== 'momentum')) return renderPlainSvg(cs, side, market, tf);
   return renderAlertSvg(cs, {
-    engine: first.engine, side: first.side, ok: true, swept_level: pattern.sweptLevel ?? cs[cs.length - 1]?.low ?? 0, tf, market, symbol,
-    notes: [], patternLen: PATTERN_LEN[first.engine],
+    engine: best.engine, side: best.side, ok: true, swept_level: pattern.sweptLevel ?? cs[cs.length - 1]?.low ?? 0, tf, market, symbol,
+    notes: [], patternLen: PATTERN_LEN[best.engine], lsccState: best.engine === 'lscc' ? 'CONFIRMED' : undefined,
   });
 }
 

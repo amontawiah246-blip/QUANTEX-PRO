@@ -38,12 +38,15 @@ test("indicators: ADX is high in a steady trend and low in a range; every snapsh
   const t = new IndicatorTracker(ind); assert.ok(Number.isNaN(t.update(SYN[0]).adx), "no value before warm-up");
 });
 
-test("configuration: every change from the defaults is listed; a 5-minute chart and expiry are locked", () => {
+test("configuration: every change from the defaults is listed; dynamic timeframes work and explicit 5-minute lock is enforced", () => {
   assert.deepEqual(diffFromDefaults(HYBRID_DEFAULTS), []);
   const c = hybridConfig({ indicators: { adx: { enabled: false } }, ml: { payout: 0.85 } });
   assert.deepEqual(diffFromDefaults(c).sort(), ["indicators.adx.enabled: true -> false", "ml.payout: 0.9 -> 0.85"]);
-  assert.throws(() => new HybridEngine("X", { ...HYBRID_DEFAULTS, tfSec: 60 }), /5-minute/);
-  assert.throws(() => new HybridEngine("X", { ...HYBRID_DEFAULTS, expirySec: 600 }), /5-minute/);
+  const dyn = new HybridEngine("X", { ...HYBRID_DEFAULTS, tfSec: 60, expirySec: 120 });
+  assert.equal(dyn.cfg.tfSec, 60);
+  assert.equal(dyn.cfg.expirySec, 120);
+  assert.throws(() => new HybridEngine("X", { ...HYBRID_DEFAULTS, lockFiveMinutes: true, tfSec: 60 }), /5-minute/);
+  assert.throws(() => new HybridEngine("X", { ...HYBRID_DEFAULTS, lockFiveMinutes: true, expirySec: 600 }), /5-minute/);
 });
 
 test("Stage 1 is frozen: parameters equal the originals and hits equal the original detectors on 6000 candles", () => {
